@@ -1,0 +1,11 @@
+[01;34m.[00m
+├── [01;34mXboxPrefill-Account1[00m
+│   ├── [01;34mConfig[00m
+│   │   └── account.config
+│   ├── [01;32mXboxPrefill[00m
+│   └── [01;32mupdate.sh[00m
+└── [01;34mXboxPrefill-Account2[00m
+    ├── [01;34mConfig[00m
+    │   └── account.config
+    ├── [01;32mXboxPrefill[00m
+    └── [01;32mupdate.sh[00m

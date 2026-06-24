@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>XboxPrefill.Smoke</AssemblyName>
+    <RootNamespace>XboxPrefill.Smoke</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- No trimming, no analyzers — standalone smoke runner -->
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Spectre.Console" Version="0.49.2-preview.0.67" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\XboxPrefill\XboxPrefill.csproj" />
+  </ItemGroup>
+</Project>
