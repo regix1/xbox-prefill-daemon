@@ -22,7 +22,7 @@ For example, using a **SK hynix Gold P31 2TB NVME** and running `prefill --force
 ## Can {{prefill_name}} be run on a schedule?
 
 Yes it can! Scheduled jobs can be easily setup on Linux using `systemd` services, and can be flexibly configured to run on any schedule that you desire.
-See [Configuring a Nightly Job](https://tpill90.github.io/{{repo_name}}/install-guides/Scheduled-Job/) for a guide on how to get setup with a schedule.
+See [Configuring a Nightly Job](https://regix1.github.io/{{repo_name}}/install-guides/Scheduled-Job/) for a guide on how to get setup with a schedule.
 
 ---
 

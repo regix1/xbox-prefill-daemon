@@ -25,7 +25,7 @@ choco install git.install
 Prior to doing any work on the project a copy of the code must first be cloned from Github.  The following will clone the repo as well as all of the required submodules:
 
 ```powershell
-git clone --recurse-submodules -j8 https://github.com/tpill90/{{repo_name}}.git
+git clone --recurse-submodules -j8 https://github.com/regix1/{{repo_name}}.git
 ```
 
 
@@ -79,4 +79,4 @@ dotnet test
 
 ## Where should I get started in the codebase?
 
-A good place to start poking around the project would be the [CliCommands folder](https://github.com/tpill90/{{repo_name}}/tree/master/{{prefill_name}}/CliCommands).  This folder contains the implementations for each of the individual commands that can be run, such as `prefill` or `select-apps`.  
+A good place to start poking around the project would be the [CliCommands folder](https://github.com/regix1/{{repo_name}}/tree/master/{{prefill_name}}/CliCommands).  This folder contains the implementations for each of the individual commands that can be run, such as `prefill` or `select-apps`.  

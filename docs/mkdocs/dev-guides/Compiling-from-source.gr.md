@@ -13,7 +13,7 @@ choco install dotnet-sdk --version=8.0.100
 ## Κλωνοποίηση του repo και των submodules
 
 ```powershell
-git clone --recurse-submodules -j8 https://github.com/tpill90/{{repo_name}}.git
+git clone --recurse-submodules -j8 https://github.com/regix1/{{repo_name}}.git
 ```
 Αν είναι ήδη κλωνοποιημένο το repository αλλά χωρίς τα submodules, τρέξε αυτήν την εντολή για να προσθέσεις τα submodules:
 ```
@@ -57,4 +57,4 @@ dotnet test
 
 ## Από που αρχίζω;
 
-Ένα καλό μέρος για να αρχίσουμε το έργο είναι το [CliCommands folder](https://github.com/tpill90/{{repo_name}}/tree/master/{{prefill_name}}/CliCommands).  Αυτός ο φάκελος περιέχει όλες τις εντολές που μπορούμε να τρέξουμε, όπως `prefill` ή `select-apps`.  
+Ένα καλό μέρος για να αρχίσουμε το έργο είναι το [CliCommands folder](https://github.com/regix1/{{repo_name}}/tree/master/{{prefill_name}}/CliCommands).  Αυτός ο φάκελος περιέχει όλες τις εντολές που μπορούμε να τρέξουμε, όπως `prefill` ή `select-apps`.  

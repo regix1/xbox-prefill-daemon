@@ -13,13 +13,10 @@ EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = ".github", ".github", "{964C7C38-DF8F-4D47-AFD0-30B670EFA4AB}"
 	ProjectSection(SolutionItems) = preProject
 		.github\workflows\build-and-test.yml = .github\workflows\build-and-test.yml
-		.github\workflows\deploy-documentation.yml = .github\workflows\deploy-documentation.yml
 		.github\workflows\release-publish.yml = .github\workflows\release-publish.yml
 	EndProjectSection
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "XboxPrefill.Test", "XboxPrefill.Test\XboxPrefill.Test.csproj", "{05CF8491-58C9-4DAD-A0EA-C96E16CB40FC}"
-EndProject
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Benchmarks", "Benchmarks\Benchmarks.csproj", "{3467CD6C-B4F2-4EE5-9872-407C2985C457}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Testing", "Testing", "{D40480CD-E51C-48F5-B1C5-938420D33C3A}"
 EndProject
@@ -39,10 +36,6 @@ Global
 		{05CF8491-58C9-4DAD-A0EA-C96E16CB40FC}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{05CF8491-58C9-4DAD-A0EA-C96E16CB40FC}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{05CF8491-58C9-4DAD-A0EA-C96E16CB40FC}.Release|Any CPU.Build.0 = Release|Any CPU
-		{3467CD6C-B4F2-4EE5-9872-407C2985C457}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{3467CD6C-B4F2-4EE5-9872-407C2985C457}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{3467CD6C-B4F2-4EE5-9872-407C2985C457}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{3467CD6C-B4F2-4EE5-9872-407C2985C457}.Release|Any CPU.Build.0 = Release|Any CPU
 		{DD478B94-C184-449D-86F8-E118690720A6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{DD478B94-C184-449D-86F8-E118690720A6}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{DD478B94-C184-449D-86F8-E118690720A6}.Release|Any CPU.ActiveCfg = Release|Any CPU
@@ -54,7 +47,6 @@ Global
 	GlobalSection(NestedProjects) = preSolution
 		{964C7C38-DF8F-4D47-AFD0-30B670EFA4AB} = {78A93A29-C93D-4B62-AB36-1845BB4E797C}
 		{05CF8491-58C9-4DAD-A0EA-C96E16CB40FC} = {D40480CD-E51C-48F5-B1C5-938420D33C3A}
-		{3467CD6C-B4F2-4EE5-9872-407C2985C457} = {D40480CD-E51C-48F5-B1C5-938420D33C3A}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {4D4A514B-B97D-444E-84A5-16D52615DBF3}

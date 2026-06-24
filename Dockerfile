@@ -1,5 +1,5 @@
 FROM ubuntu:20.04
-LABEL maintainers="tpilius@gmail.com;regix1"
+LABEL maintainers="regix1"
 
 ARG TARGETARCH
 

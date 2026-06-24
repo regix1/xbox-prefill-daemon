@@ -10,11 +10,23 @@ lockfile
 *.log
 *.user
 XboxPrefill/Properties/PublishProfiles/FolderProfile.pubxml
-/Benchmarks/BenchmarkDotNet.Artifacts/results
 /docs/RenderAnsiToSvg/__pycache__/*.pyc
-.serena/project.yml
-.serena/project.yml
 
+# AI assistant tools and config
 .serena/
 .claude/
 .firecrawl/
+.cursor/
+.cursorrules
+.cursorignore
+.cursorindexingignore
+.aider*
+.continue/
+.windsurfrules
+.github/copilot-instructions.md
+.mcp.json
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+GEMINI.md
+.codeium/

@@ -7,7 +7,7 @@
     <AssemblyName>XboxPrefill</AssemblyName>
     <RootNamespace>XboxPrefill</RootNamespace>
     <VersionPrefix>2.1.0</VersionPrefix>
-    <Authors>tpill90</Authors>
+    <Authors>regix1</Authors>
 
     <!-- Code analysis settings -->
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
