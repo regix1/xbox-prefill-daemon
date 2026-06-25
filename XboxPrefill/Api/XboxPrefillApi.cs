@@ -136,13 +136,14 @@ public sealed class XboxPrefillApi : IDisposable
 
                 try
                 {
-                    var manifestUrl = await _xboxManager.GetManifestDownloadUrlAsync(app);
+                    var manifest = await _xboxManager.GetManifestDownloadUrlAsync(app);
                     results.Add(new CdnInfo
                     {
                         AppId = app.AppId,
                         Name = app.Title,
-                        CdnHost = manifestUrl.ManifestDownloadUri.Host,
-                        ChunkBaseUrl = manifestUrl.ChunkBaseUrl
+                        CdnHost = manifest.ManifestDownloadUri.Host,
+                        ChunkBaseUrl = manifest.ChunkBaseUrl,
+                        FilePathFragments = manifest.FilePathFragments
                     });
                 }
                 catch (Exception ex)
@@ -545,6 +546,13 @@ public class CdnInfo
     public string Name { get; init; } = string.Empty;
     public string CdnHost { get; init; } = string.Empty;
     public string ChunkBaseUrl { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Stable per-file path fragments (<c>/filestreamingservice/files/&lt;36-char-GUID&gt;</c>, query string
+    /// stripped) for each downloadable package file. The manager uses these to map cache hits back to this
+    /// product. Empty when the manifest resolved no downloadable files.
+    /// </summary>
+    public List<string> FilePathFragments { get; init; } = new();
 }
 
 public class CdnInfoResult

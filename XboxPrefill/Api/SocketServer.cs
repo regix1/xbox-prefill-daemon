@@ -3,6 +3,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -89,20 +90,18 @@ public sealed class SocketServer : IAsyncDisposable
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
             {
                 Directory.CreateDirectory(dir);
+                // 0700: owner-only; no group/other access to the socket directory
                 TrySetUnixPermissions(dir,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-                    UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
-                    UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
 
             _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             _listener.Bind(new UnixDomainSocketEndPoint(socketPath));
             _listener.Listen(5);
 
+            // 0600: owner-only; no group/other read/write on the socket file
             TrySetUnixPermissions(socketPath,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite |
-                UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
-                UnixFileMode.OtherRead | UnixFileMode.OtherWrite);
+                UnixFileMode.UserRead | UnixFileMode.UserWrite);
 
             _progress.OnLog(LogLevel.Info, $"Socket server listening on: {socketPath}");
         }
@@ -207,7 +206,10 @@ public sealed class SocketServer : IAsyncDisposable
                         {
                             if (request.Type == "auth" && request.Parameters?.TryGetValue("secret", out var providedSecret) == true)
                             {
-                                if (providedSecret == _sharedSecret)
+                                // Constant-time compare to prevent timing-based secret enumeration.
+                                var expectedBytes = Encoding.UTF8.GetBytes(_sharedSecret);
+                                var providedBytes = Encoding.UTF8.GetBytes(providedSecret ?? string.Empty);
+                                if (CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes))
                                 {
                                     client.IsAuthenticated = true;
                                     _progress.OnLog(LogLevel.Info, $"Client {client.Id} authenticated successfully");
@@ -320,7 +322,13 @@ public sealed class SocketServer : IAsyncDisposable
             await stream.WriteAsync(bytes, cancellationToken);
             await stream.FlushAsync(cancellationToken);
 
-            _progress.OnLog(LogLevel.Debug, $"Sent response to {client.Id}: {json[..Math.Min(200, json.Length)]}...");
+            // Avoid logging sensitive payloads (credential-challenge contains the server public key and
+            // challenge metadata; auth responses may carry derived secrets).
+            var isSensitive = json.Contains("\"credential-challenge\"", StringComparison.OrdinalIgnoreCase)
+                              || json.Contains("\"serverPublicKey\"", StringComparison.OrdinalIgnoreCase);
+            _progress.OnLog(LogLevel.Debug, isSensitive
+                ? $"Sent response to {client.Id}: [redacted]"
+                : $"Sent response to {client.Id}: {json[..Math.Min(200, json.Length)]}...");
         }
         finally
         {

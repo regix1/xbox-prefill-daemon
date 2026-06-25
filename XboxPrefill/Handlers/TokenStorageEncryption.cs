@@ -86,14 +86,34 @@ namespace XboxPrefill.Handlers
         }
 
         /// <summary>
-        /// Derives a 256-bit key from the machine name so that stored tokens can only be
-        /// decrypted on the machine where they were saved.
+        /// Derives a 256-bit key for token storage.
+        /// When <c>PREFILL_SOCKET_SECRET</c> is set it is used as the IKM (input key material), scoping
+        /// decryption to holders of that secret. The machine name is mixed in as HKDF salt so that a leaked
+        /// secret alone cannot decrypt tokens from a different host.
+        /// When the env var is absent the machine name is used as IKM (legacy behaviour — not a secret,
+        /// but still scopes decryption to this host).
         /// </summary>
         private static byte[] DeriveKey()
         {
-            // Use machine name as input key material; not a secret, but scopes decryption to this host.
-            var ikm = Encoding.UTF8.GetBytes(Environment.MachineName);
+            var socketSecret = Environment.GetEnvironmentVariable("PREFILL_SOCKET_SECRET");
+            byte[] ikm;
+            byte[] salt;
+
+            if (!string.IsNullOrEmpty(socketSecret))
+            {
+                // IKM = the socket secret (an actual secret); salt = machine name (host-scoping).
+                ikm = Encoding.UTF8.GetBytes(socketSecret);
+                salt = Encoding.UTF8.GetBytes(Environment.MachineName);
+            }
+            else
+            {
+                // Fallback: machine name only (not a secret — scopes decryption to this host).
+                ikm = Encoding.UTF8.GetBytes(Environment.MachineName);
+                salt = Array.Empty<byte>();
+            }
+
             return HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, KeySize,
+                salt: salt,
                 info: Encoding.UTF8.GetBytes(PurposeLabel));
         }
 

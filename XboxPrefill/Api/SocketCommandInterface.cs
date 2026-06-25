@@ -197,6 +197,22 @@ public sealed class SocketCommandInterface : IDisposable
     private CommandResponse HandleLogout(CommandRequest request)
     {
         CleanupApiInstance();
+
+        // Wipe the persisted account file so the refresh token does not linger on disk after logout.
+        try
+        {
+            var accountPath = Settings.AppConfig.AccountSettingsStorePath;
+            if (File.Exists(accountPath))
+            {
+                File.Delete(accountPath);
+                _progress.OnLog(LogLevel.Info, "Account credentials removed from disk");
+            }
+        }
+        catch (Exception ex)
+        {
+            _progress.OnLog(LogLevel.Warning, $"Could not remove account credentials from disk: {ex.Message}");
+        }
+
         _progress.OnLog(LogLevel.Info, "Logged out");
 
         return new CommandResponse

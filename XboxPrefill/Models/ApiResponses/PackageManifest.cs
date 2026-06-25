@@ -37,5 +37,13 @@ namespace XboxPrefill.Models.ApiResponses
 
         /// <summary>The base path on the CDN. Informational; used for the CDN-info API.</summary>
         public string ChunkBaseUrl => "/";
+
+        /// <summary>
+        /// The stable per-file path fragments (path only, query string stripped) extracted from
+        /// the package manifest. Each entry is a <c>/filestreamingservice/files/&lt;36-char-GUID&gt;</c>
+        /// path that the lancache manager uses to map cache hits back to this product.
+        /// Populated by <see cref="XboxPrefill.Handlers.ManifestHandler.ResolvePackageAsync"/>.
+        /// </summary>
+        public List<string> FilePathFragments { get; set; } = new();
     }
 }

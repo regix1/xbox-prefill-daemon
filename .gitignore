@@ -12,6 +12,10 @@ lockfile
 XboxPrefill/Properties/PublishProfiles/FolderProfile.pubxml
 /docs/RenderAnsiToSvg/__pycache__/*.pyc
 
+# Runtime-generated credential and config files — must never be committed
+Config/
+userAccount.json
+
 .serena/
 .claude/
 .firecrawl/

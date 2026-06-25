@@ -83,6 +83,13 @@ namespace XboxPrefill.Handlers
                 throw new ManifestException($"Package for product {app.AppId} ({app.Title}) contained no downloadable files.");
             }
 
+            // Collect the stable per-file path fragments (path only, query string stripped) for the
+            // CDN-info API. The lancache manager uses these to map cached requests back to this product.
+            manifest.FilePathFragments = queue
+                .Select(static r => r.DownloadUrl.Contains('?') ? r.DownloadUrl[..r.DownloadUrl.IndexOf('?')] : r.DownloadUrl)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
             manifest.QueuedRequests = queue;
             _ansiConsole.LogMarkupVerbose($"Resolved {LightYellow(queue.Count)} package files for {Magenta(app.Title)}");
             return manifest;
