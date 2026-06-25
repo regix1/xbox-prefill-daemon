@@ -26,7 +26,14 @@ public sealed class SecureCredentialExchange : IDisposable
     private SecureCredentialExchange()
     {
         _challengeId = Guid.NewGuid().ToString("N");
-        _expiresAt = DateTime.UtcNow.AddMinutes(5);
+        // The challenge lives for the lifetime of the container/session, not a short
+        // 5-minute window. Device-code login (microsoft.com/link) routinely takes longer
+        // than 5 minutes, and the container is ephemeral (one per session, killed on
+        // session end / cancel / the 120-minute session timeout), so the challenge can
+        // never outlive the container anyway. We set a generous upper bound well beyond
+        // the session cap so the login does not fail if the user is slow at the device
+        // flow, while still keeping a finite expiry as a safety net.
+        _expiresAt = DateTime.UtcNow.AddHours(24);
         GenerateKeyPair();
     }
 

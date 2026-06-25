@@ -26,7 +26,7 @@ public static class DaemonMode
         Console.WriteLine("├──────────────────────────────────────────────────────────────┤");
         Console.WriteLine("│ • Login is REQUIRED before any other commands                │");
         Console.WriteLine("│ • All credentials are encrypted using ECDH + AES-GCM         │");
-        Console.WriteLine("│ • Challenges expire after 5 minutes                          │");
+        Console.WriteLine("│ • Challenge stays valid for the whole session                │");
         Console.WriteLine("└──────────────────────────────────────────────────────────────┘");
         Console.WriteLine();
 
@@ -67,7 +67,7 @@ public static class DaemonMode
         Console.WriteLine("├──────────────────────────────────────────────────────────────┤");
         Console.WriteLine("│ • Login is REQUIRED before any other commands                │");
         Console.WriteLine("│ • All credentials are encrypted using ECDH + AES-GCM         │");
-        Console.WriteLine("│ • Challenges expire after 5 minutes                          │");
+        Console.WriteLine("│ • Challenge stays valid for the whole session                │");
         Console.WriteLine("└──────────────────────────────────────────────────────────────┘");
         Console.WriteLine();
 
