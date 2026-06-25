@@ -6,9 +6,26 @@ namespace XboxPrefill.Handlers
     {
         private const int MaxDownloadRetries = 2;
 
+        /// <summary>
+        /// Maximum time to wait for lancache to START responding (i.e. return response headers) to a
+        /// content request. This bounds ONLY the time-to-first-response-headers, not the body transfer,
+        /// so a slow-but-progressing large file is never cut off. When lancache has no upstream for the
+        /// request's Host (e.g. the cache-domain group covering that host is not enabled), nginx never
+        /// sends response headers and the request would otherwise hang forever transferring 0 bytes;
+        /// this timeout makes that case fail fast instead.
+        /// </summary>
+        private static readonly TimeSpan ResponseHeadersTimeout = TimeSpan.FromSeconds(100);
+
         private readonly IAnsiConsole _ansiConsole;
         private readonly HttpClient _client;
         private readonly IPrefillProgress _progress;
+
+        /// <summary>
+        /// Set when a content request times out waiting for lancache to start responding. This is the
+        /// signature of a lancache that cannot serve the request's upstream Host (missing cache-domain
+        /// group), so we surface a specific, actionable error instead of a silent stall + retry loop.
+        /// </summary>
+        private volatile string? _stalledUpstreamHost;
 
         /// <summary>
         /// The URL/IP Address where the Lancache has been detected.
@@ -22,6 +39,9 @@ namespace XboxPrefill.Handlers
 
             _client = new HttpClient();
             _client.DefaultRequestHeaders.Add("User-Agent", AppConfig.DefaultUserAgent);
+            // Disable HttpClient's overall timeout so it never cuts off a slow-but-progressing large file.
+            // Timeouts are scoped per request to the response-headers wait only (see ResponseHeadersTimeout).
+            _client.Timeout = Timeout.InfiniteTimeSpan;
         }
 
         //TODO document allManifestUrls
@@ -69,6 +89,25 @@ namespace XboxPrefill.Handlers
                 return true;
             }
 
+            // If requests stalled waiting for lancache to even start responding, the cause is almost
+            // always a lancache that has no upstream configured for the content host - i.e. the relevant
+            // cache-domain group is not enabled. Surface a specific, actionable error (instead of a bare
+            // "download failed") so the manager/UI shows the user exactly what to fix.
+            var stalledHost = _stalledUpstreamHost;
+            if (!string.IsNullOrEmpty(stalledHost))
+            {
+                var message =
+                    $"Download stalled: lancache returned no data for Host '{stalledHost}' " +
+                    $"(no response within {ResponseHeadersTimeout.TotalSeconds:0} seconds). " +
+                    "This usually means the cache-domain group for that host is not enabled in lancache. " +
+                    "Xbox game content requires the 'windowsupdates' (and 'xboxlive') cache-domain groups - " +
+                    "enable them in your lancache (uklans/cache-domains) and reload.";
+                _ansiConsole.LogMarkupError(message);
+                _ansiConsole.WriteLine();
+                _progress.OnError(message);
+                return false;
+            }
+
             _ansiConsole.LogMarkupError($"Download failed with {LightYellow(failedRequests.Count)} failed requests");
             _ansiConsole.WriteLine();
             return false;
@@ -96,6 +135,14 @@ namespace XboxPrefill.Handlers
 
             await Parallel.ForEachAsync(requestsToDownload, new ParallelOptions { MaxDegreeOfParallelism = AppConfig.MaxConcurrentRequests, CancellationToken = cancellationToken }, async (chunk, ct) =>
             {
+                var upstreamHost = string.IsNullOrEmpty(chunk.UpstreamHost) ? upstreamCdn.Host : chunk.UpstreamHost;
+
+                // Bound ONLY the wait for response headers (the time for lancache to start responding).
+                // The body transfer below uses the caller's token, so a slow-but-progressing large file
+                // is never cut off - only a request that never starts responding (the 0-byte stall) trips.
+                using var headersTimeoutCts = new CancellationTokenSource(ResponseHeadersTimeout);
+                using var headersCts = CancellationTokenSource.CreateLinkedTokenSource(ct, headersTimeoutCts.Token);
+
                 try
                 {
                     var url = Path.Join($"http://{_lancacheAddress}", chunk.DownloadUrl);
@@ -107,9 +154,9 @@ namespace XboxPrefill.Handlers
                     using var requestMessage = new HttpRequestMessage(HttpMethod.Get, url);
                     // The Host header carries THIS file's upstream CDN host (files can live on different hosts).
                     // Fall back to the manifest-wide host only if a request didn't capture its own.
-                    requestMessage.Headers.Host = string.IsNullOrEmpty(chunk.UpstreamHost) ? upstreamCdn.Host : chunk.UpstreamHost;
+                    requestMessage.Headers.Host = upstreamHost;
 
-                    using var response = await _client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, ct);
+                    using var response = await _client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, headersCts.Token);
                     response.EnsureSuccessStatusCode();
                     using Stream responseStream = await response.Content.ReadAsStreamAsync(ct);
 
@@ -121,8 +168,17 @@ namespace XboxPrefill.Handlers
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    // Propagate cancellation - let Parallel.ForEachAsync stop
+                    // Propagate caller cancellation - let Parallel.ForEachAsync stop
                     throw;
+                }
+                catch (OperationCanceledException) when (headersTimeoutCts.IsCancellationRequested)
+                {
+                    // lancache never started responding for this Host - the cache-domain group covering it
+                    // is almost certainly not enabled. Record the host so the final failure can name it.
+                    _stalledUpstreamHost = upstreamHost;
+                    failedRequests.Add(chunk);
+                    FileLogger.LogExceptionNoStackTrace($"Request {chunk.DownloadUrl}",
+                        new TimeoutException($"lancache returned no response for Host '{upstreamHost}' within {ResponseHeadersTimeout.TotalSeconds:0}s"));
                 }
                 catch (Exception e)
                 {
