@@ -90,18 +90,30 @@ public sealed class SocketServer : IAsyncDisposable
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
             {
                 Directory.CreateDirectory(dir);
-                // 0700: owner-only; no group/other access to the socket directory
+                // Set directory permissions to 0777 for cross-container access
                 TrySetUnixPermissions(dir,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                    UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+                    UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
             }
 
             _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             _listener.Bind(new UnixDomainSocketEndPoint(socketPath));
             _listener.Listen(5);
 
-            // 0600: owner-only; no group/other read/write on the socket file
+            // SECURITY: Set socket file permissions for container communication
+            // The socket is protected by:
+            // 1. Docker volume isolation - only containers with the volume mounted can access it
+            // 2. Credential encryption - all credentials use ECDH + AES-GCM encryption
+            // 3. Challenge expiration - credential challenges expire after 5 minutes
+            // 4. Optional shared secret authentication via PREFILL_SOCKET_SECRET env var
+            //
+            // We use 0666 to allow cross-container communication when containers run as
+            // different users. Docker volume isolation is the primary security boundary.
             TrySetUnixPermissions(socketPath,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
+                UnixFileMode.OtherRead | UnixFileMode.OtherWrite);
 
             _progress.OnLog(LogLevel.Info, $"Socket server listening on: {socketPath}");
         }
