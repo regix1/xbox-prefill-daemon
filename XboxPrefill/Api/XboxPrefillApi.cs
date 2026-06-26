@@ -145,6 +145,10 @@ public sealed class XboxPrefillApi : IDisposable
                         ChunkBaseUrl = manifest.ChunkBaseUrl,
                         FilePathFragments = manifest.FilePathFragments
                     });
+
+                    // Opt-in [MAP] diagnostics: log the exact /filestreamingservice/files/<GUID> fragments this app
+                    // emits for naming, so they can be compared against the GUIDs the daemon later requests.
+                    MappingDebugLogger.LogCdnInfoEmit(_progress, app.Title, app.AppId, manifest.ManifestDownloadUri.Host, manifest.FilePathFragments);
                 }
                 catch (Exception ex)
                 {

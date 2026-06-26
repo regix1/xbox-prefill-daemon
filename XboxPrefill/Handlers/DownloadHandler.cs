@@ -16,6 +16,15 @@ namespace XboxPrefill.Handlers
         /// </summary>
         private static readonly TimeSpan ResponseHeadersTimeout = TimeSpan.FromSeconds(100);
 
+        /// <summary>
+        /// Maximum time the body read may go WITHOUT receiving any new bytes before the slice is treated as a
+        /// stalled (retriable) failure. The window is reset on every successful read, so a slow-but-progressing
+        /// large file is never cut off - only a mid-stream stall trips it (e.g. nginx sent 200 headers then the
+        /// slice subrequest died and the connection hangs). This is separate from <see cref="ResponseHeadersTimeout"/>,
+        /// which bounds only the wait for response headers, not the body transfer.
+        /// </summary>
+        private static readonly TimeSpan BodyIdleTimeout = TimeSpan.FromSeconds(100);
+
         private readonly IAnsiConsole _ansiConsole;
         private readonly HttpClient _client;
         private readonly IPrefillProgress _progress;
@@ -133,37 +142,92 @@ namespace XboxPrefill.Handlers
             var progressAppId = appId ?? upstreamCdn.Host;
             var progressAppName = appName ?? upstreamCdn.Host;
 
+            // Opt-in [MAP] diagnostics state (only built when XBOX_DEBUG_MAPPING is on, so the hot path is untouched
+            // otherwise). Pre-group the slice list by distinct file path so each file's request/response is logged
+            // ONCE (on its first slice) and a single completion line can report bytes-received vs file size across all
+            // slices, instead of emitting tens of thousands of per-slice lines.
+            var debugMapping = MappingDebugLogger.Enabled;
+            Dictionary<string, long>? debugExpectedBytesByFile = null;
+            Dictionary<string, int>? debugSliceCountByFile = null;
+            ConcurrentDictionary<string, FileDebugProgress>? debugProgressByFile = null;
+            if (debugMapping)
+            {
+                debugExpectedBytesByFile = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                debugSliceCountByFile = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var request in requestsToDownload)
+                {
+                    var filePath = MappingDebugLogger.ToFragment(request.DownloadUrl);
+                    debugExpectedBytesByFile[filePath] = debugExpectedBytesByFile.GetValueOrDefault(filePath) + (long)request.DownloadSizeBytes;
+                    debugSliceCountByFile[filePath] = debugSliceCountByFile.GetValueOrDefault(filePath) + 1;
+                }
+                debugProgressByFile = new ConcurrentDictionary<string, FileDebugProgress>(StringComparer.OrdinalIgnoreCase);
+            }
+
             await Parallel.ForEachAsync(requestsToDownload, new ParallelOptions { MaxDegreeOfParallelism = AppConfig.MaxConcurrentRequests, CancellationToken = cancellationToken }, async (chunk, ct) =>
             {
                 var upstreamHost = string.IsNullOrEmpty(chunk.UpstreamHost) ? upstreamCdn.Host : chunk.UpstreamHost;
 
                 // Bound ONLY the wait for response headers (the time for lancache to start responding).
-                // The body transfer below uses the caller's token, so a slow-but-progressing large file
-                // is never cut off - only a request that never starts responding (the 0-byte stall) trips.
                 using var headersTimeoutCts = new CancellationTokenSource(ResponseHeadersTimeout);
                 using var headersCts = CancellationTokenSource.CreateLinkedTokenSource(ct, headersTimeoutCts.Token);
 
+                // Idle body-read timeout: armed only once the body is being read (CancelAfter below) and reset on
+                // each successful read, so a slow-but-progressing large file is never cut off - only a mid-stream
+                // stall trips it. Declared out here so the catch filters can tell an idle stall apart from a
+                // caller cancel or a headers timeout. headersReceived disambiguates the two timers, since the
+                // 100 s headers timer keeps running and could fire spuriously during a long body read.
+                using var bodyIdleCts = new CancellationTokenSource();
+                using var bodyCts = CancellationTokenSource.CreateLinkedTokenSource(ct, bodyIdleCts.Token);
+                bool headersReceived = false;
+
                 try
                 {
-                    var url = Path.Join($"http://{_lancacheAddress}", chunk.DownloadUrl);
-                    if (forceRecache)
+                    // Resolve this file's [MAP] accounting handle once (gated; nothing is allocated when disabled).
+                    FileDebugProgress? fileProgress = null;
+                    string? requestPath = null;
+                    if (debugMapping)
                     {
-                        url += "?nocache=1";
+                        requestPath = MappingDebugLogger.ToFragment(chunk.DownloadUrl);
+                        fileProgress = debugProgressByFile!.GetOrAdd(requestPath, static _ => new FileDebugProgress());
                     }
 
-                    using var requestMessage = new HttpRequestMessage(HttpMethod.Get, url);
-                    // The Host header carries THIS file's upstream CDN host (files can live on different hosts).
-                    // Fall back to the manifest-wide host only if a request didn't capture its own.
-                    requestMessage.Headers.Host = upstreamHost;
+                    using var requestMessage = BuildContentRequest(_lancacheAddress, chunk, upstreamHost, forceRecache);
 
                     using var response = await _client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, headersCts.Token);
+                    headersReceived = true; // past the headers wait; from here only the idle body timeout applies
+
+                    // [MAP] request/response: log once per distinct file (the first slice to arrive), capturing the
+                    // requested GUID + the CDN status BEFORE EnsureSuccessStatusCode so a 200/403/404 is still recorded.
+                    if (debugMapping && fileProgress!.TryMarkRequestLogged())
+                    {
+                        MappingDebugLogger.LogFileRequest(_progress, requestPath!, upstreamHost,
+                            $"bytes={chunk.LowerByteRange}-{chunk.UpperByteRange}",
+                            (int)response.StatusCode,
+                            response.Content.Headers.ContentRange?.ToString());
+                    }
+
                     response.EnsureSuccessStatusCode();
                     using Stream responseStream = await response.Content.ReadAsStreamAsync(ct);
 
                     // Don't save the data anywhere, so we don't have to waste time writing it to disk.
                     var buffer = new byte[4096];
-                    while (await responseStream.ReadAsync(buffer, ct) != 0)
+                    long sliceBytesRead = 0;
+                    bodyIdleCts.CancelAfter(BodyIdleTimeout); // arm the idle window before the first read
+                    int bytesRead;
+                    while ((bytesRead = await responseStream.ReadAsync(buffer, bodyCts.Token)) != 0)
                     {
+                        bodyIdleCts.CancelAfter(BodyIdleTimeout); // reset the idle window on each successful read
+                        if (debugMapping)
+                        {
+                            sliceBytesRead += bytesRead;
+                        }
+                    }
+
+                    // [MAP] completion: when this file's LAST slice finishes, log bytes received vs file size so a human
+                    // can confirm bytes actually flowed for the requested GUID (not a 0-byte stall).
+                    if (debugMapping && fileProgress!.TryCompleteSlice(sliceBytesRead, debugSliceCountByFile![requestPath!], out var fileBytesReceived, out var slicesCompleted))
+                    {
+                        MappingDebugLogger.LogFileCompleted(_progress, requestPath!, fileBytesReceived, debugExpectedBytesByFile![requestPath!], slicesCompleted);
                     }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -171,7 +235,7 @@ namespace XboxPrefill.Handlers
                     // Propagate caller cancellation - let Parallel.ForEachAsync stop
                     throw;
                 }
-                catch (OperationCanceledException) when (headersTimeoutCts.IsCancellationRequested)
+                catch (OperationCanceledException) when (!headersReceived && headersTimeoutCts.IsCancellationRequested)
                 {
                     // lancache never started responding for this Host - the cache-domain group covering it
                     // is almost certainly not enabled. Record the host so the final failure can name it.
@@ -179,6 +243,15 @@ namespace XboxPrefill.Handlers
                     failedRequests.Add(chunk);
                     FileLogger.LogExceptionNoStackTrace($"Request {chunk.DownloadUrl}",
                         new TimeoutException($"lancache returned no response for Host '{upstreamHost}' within {ResponseHeadersTimeout.TotalSeconds:0}s"));
+                }
+                catch (OperationCanceledException) when (bodyIdleCts.IsCancellationRequested)
+                {
+                    // Headers arrived but the body stalled mid-stream (no new bytes within the idle window) - the
+                    // signature of a slice subrequest that died upstream. Record the slice as a retriable failure
+                    // so the existing retry loop re-fetches it instead of hanging forever.
+                    failedRequests.Add(chunk);
+                    FileLogger.LogExceptionNoStackTrace($"Request {chunk.DownloadUrl}",
+                        new TimeoutException($"lancache stalled mid-transfer for Host '{upstreamHost}' (no data within {BodyIdleTimeout.TotalSeconds:0}s)"));
                 }
                 catch (Exception e)
                 {
@@ -229,6 +302,71 @@ namespace XboxPrefill.Handlers
             });
 
             return failedRequests;
+        }
+
+        /// <summary>
+        /// Builds the lancache content request for a single 1 MB-aligned slice: <c>GET http://{lancache}{path}</c>
+        /// with the upstream <c>Host</c> header and an exact-boundary <c>Range</c> header
+        /// (<c>bytes={Lower}-{Upper}</c>). The Range is the crux of the fix - it makes nginx's
+        /// <c>@upstream_redirect</c> forward a matching <c>$http_range</c> to delivery.mp so the slice module
+        /// gets the 206 it demands. A request with no Range (or an open-ended <c>bytes=0-</c>) makes the CDN
+        /// return 200 / a whole-file 206 and the slice subrequest aborts at 0 bytes.
+        /// </summary>
+        /// <remarks>
+        /// <paramref name="forceRecache"/> is intentionally not used to append a query parameter.
+        /// lancache's slice cache key is <c>md5($cacheidentifier$uri$slice_range)</c> where nginx
+        /// <c>$uri</c> is the request path WITHOUT the query string, so any query-based cache-bust
+        /// is a complete no-op against the slice key. Xbox content <c>DownloadUrl</c> values are
+        /// already signed URIs (carrying P1/P2/P3/P4 params); appending a second <c>?</c> corrupts
+        /// the signature and causes 403s on every retry. Retries simply re-request the identical
+        /// URL; lancache will re-fetch from upstream for any stale or missing slice automatically.
+        /// </remarks>
+        internal static HttpRequestMessage BuildContentRequest(string lancacheAddress, QueuedRequest chunk, string upstreamHost, bool forceRecache)
+        {
+            var url = Path.Join($"http://{lancacheAddress}", chunk.DownloadUrl);
+
+            var requestMessage = new HttpRequestMessage(HttpMethod.Get, url);
+            // The Host header carries THIS file's upstream CDN host (files can live on different hosts).
+            // Fall back to the manifest-wide host only if a request didn't capture its own.
+            requestMessage.Headers.Host = upstreamHost;
+            // Exact 1 MB-aligned slice range so nginx's $slice_range is matched and delivery.mp returns 206.
+            requestMessage.Headers.Range = new RangeHeaderValue(chunk.LowerByteRange, chunk.UpperByteRange);
+            return requestMessage;
+        }
+
+        /// <summary>
+        /// Thread-safe per-file accounting for the opt-in <c>[MAP]</c> diagnostics. A package file is fetched as many
+        /// parallel 1 MB slices, so this collapses those slices back to one request-log decision and one completion
+        /// line: <see cref="TryMarkRequestLogged"/> returns true for exactly the first slice to reach the request log,
+        /// and <see cref="TryCompleteSlice"/> returns true only for the slice that completes the file (the running
+        /// byte total is then fully settled because every slice adds its bytes before incrementing the count).
+        /// </summary>
+        private sealed class FileDebugProgress
+        {
+            private long _bytesReceived;
+            private int _slicesCompleted;
+            private int _requestLogged;
+
+            /// <summary>Returns true exactly once, for the first slice of the file to reach the request log.</summary>
+            public bool TryMarkRequestLogged() => Interlocked.Exchange(ref _requestLogged, 1) == 0;
+
+            /// <summary>
+            /// Records a completed slice's byte count. Returns true only when this is the file's final slice
+            /// (<paramref name="slicesCompleted"/> == <paramref name="expectedSlices"/>), with the fully-settled
+            /// <paramref name="totalBytes"/> received across all slices.
+            /// </summary>
+            public bool TryCompleteSlice(long sliceBytes, int expectedSlices, out long totalBytes, out int slicesCompleted)
+            {
+                Interlocked.Add(ref _bytesReceived, sliceBytes);
+                slicesCompleted = Interlocked.Increment(ref _slicesCompleted);
+                if (slicesCompleted == expectedSlices)
+                {
+                    totalBytes = Interlocked.Read(ref _bytesReceived);
+                    return true;
+                }
+                totalBytes = 0;
+                return false;
+            }
         }
 
         public void Dispose()

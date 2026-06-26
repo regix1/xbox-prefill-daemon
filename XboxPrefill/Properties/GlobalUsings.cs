@@ -1,5 +1,6 @@
 global using ByteSizeLib;
 global using XboxPrefill.Api;
+global using XboxPrefill.Diagnostics;
 global using XboxPrefill.Handlers;
 global using XboxPrefill.Models;
 global using XboxPrefill.Models.ApiResponses;

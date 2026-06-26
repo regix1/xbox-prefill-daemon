@@ -125,6 +125,43 @@ namespace XboxPrefill.Settings
         /// </summary>
         public static bool NoLocalCache { get; set; }
 
+        /// <summary>
+        /// Name-mapping diagnostics. When true, the daemon emits greppable <c>[MAP]</c> lines to stdout
+        /// (visible via <c>docker logs</c>) showing, per app, the <c>/filestreamingservice/files/&lt;GUID&gt;</c>
+        /// fragments that <c>get-cdn-info</c> emits for naming and, per file, the GUID actually requested through
+        /// lancache plus the CDN response status, so a human can confirm the emitted GUID matches the requested one.
+        /// <para>
+        /// ON by default — the manager spawns the daemon container, so an operator cannot set per-container env
+        /// vars; defaulting on makes the mapping trace available without any configuration. The logging is per-app
+        /// and per-file (NOT per 1 MB slice), so it stays low-volume. Set the <c>XBOX_DEBUG_MAPPING</c> environment
+        /// variable to a falsy value (<c>0</c>/<c>false</c>/<c>no</c>/<c>off</c>, case-insensitive) to disable it;
+        /// read once at startup.
+        /// </para>
+        /// </summary>
+        public static bool DebugMapping { get; } = ReadBooleanEnvironmentVariable("XBOX_DEBUG_MAPPING", defaultWhenUnset: true);
+
+        /// <summary>
+        /// Reads a boolean switch from an environment variable. An unset, blank, or unrecognised value falls back to
+        /// <paramref name="defaultWhenUnset"/>. Recognises <c>1</c>/<c>true</c>/<c>yes</c>/<c>on</c> (case-insensitive)
+        /// as enabled and <c>0</c>/<c>false</c>/<c>no</c>/<c>off</c> as disabled, so a default-on switch can still be
+        /// turned off explicitly.
+        /// </summary>
+        private static bool ReadBooleanEnvironmentVariable(string variableName, bool defaultWhenUnset)
+        {
+            var rawValue = Environment.GetEnvironmentVariable(variableName);
+            if (string.IsNullOrWhiteSpace(rawValue))
+            {
+                return defaultWhenUnset;
+            }
+
+            return rawValue.Trim().ToLowerInvariant() switch
+            {
+                "1" or "true" or "yes" or "on" => true,
+                "0" or "false" or "no" or "off" => false,
+                _ => defaultWhenUnset
+            };
+        }
+
         #endregion
     }
 }
