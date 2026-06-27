@@ -41,6 +41,11 @@ namespace XboxPrefill
                     cts.Cancel();
                 };
 
+                // Optional self-shutdown timer. When PREFILL_MAX_LIFETIME_SECONDS is a positive integer the
+                // daemon cancels the host CTS on elapse, which unblocks the daemon's Task.Delay(Infinite) and
+                // drives a clean shutdown (process exits 0 / the container stops). Unset or <= 0 = run forever.
+                using var lifetimeTimer = StartMaxLifetimeTimer(cts);
+
                 if (useTcp)
                 {
                     await DaemonMode.RunTcpAsync(tcpPort, cts.Token);
@@ -65,6 +70,30 @@ namespace XboxPrefill
                 }
                 return 1;
             }
+        }
+
+        /// <summary>
+        /// Reads <c>PREFILL_MAX_LIFETIME_SECONDS</c>; when it parses to a positive integer, starts a one-shot
+        /// timer that cancels <paramref name="cts"/> on elapse to trigger a clean shutdown. Returns the timer
+        /// (kept alive by the caller via <c>using</c>) or null when no lifetime cap is configured.
+        /// </summary>
+        private static System.Threading.Timer? StartMaxLifetimeTimer(CancellationTokenSource cts)
+        {
+            var raw = Environment.GetEnvironmentVariable("PREFILL_MAX_LIFETIME_SECONDS");
+            if (!int.TryParse(raw, out var seconds) || seconds <= 0)
+            {
+                return null;
+            }
+
+            Console.WriteLine($"Max lifetime configured: daemon will self-shutdown after {seconds} second(s).");
+
+            var dueTime = TimeSpan.FromSeconds(seconds);
+            return new System.Threading.Timer(_ =>
+            {
+                Console.WriteLine($"\nMax lifetime of {seconds}s reached - initiating clean shutdown...");
+                try { cts.Cancel(); }
+                catch (ObjectDisposedException) { /* already shutting down */ }
+            }, null, dueTime, System.Threading.Timeout.InfiniteTimeSpan);
         }
 
         private static void ParseHiddenFlags()

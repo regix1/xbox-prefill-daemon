@@ -36,9 +36,24 @@ namespace XboxPrefill
 
         public string? DisplayName => _accountManager.DisplayName;
 
+        /// <summary>True when a long-lived MSA refresh token is stored (the real ~90d login bound).</summary>
+        public bool HasRefreshToken => _accountManager.HasRefreshToken;
+
+        /// <summary>Expiry (UTC) of the short-lived (~16h) XSTS tokens; null when none minted.</summary>
+        public DateTime? XstsExpiryUtc => _accountManager.XstsExpiryUtc;
+
         public async Task InitializeAsync()
         {
             await _accountManager.LoginAsync();
+        }
+
+        /// <summary>
+        /// Imports an MSA refresh token + device key (PKCS#8) into the encrypted store and logs in
+        /// non-interactively, with the device-code fallback suppressed.
+        /// </summary>
+        public async Task ImportLoginAsync(string refreshToken, string? deviceKeyPkcs8, CancellationToken cancellationToken = default)
+        {
+            await _accountManager.ImportAndLoginAsync(refreshToken, deviceKeyPkcs8, cancellationToken);
         }
 
         public async Task DownloadMultipleAppsAsync(bool downloadAllOwnedGames, bool force = false, List<string> manualIds = null, CancellationToken cancellationToken = default)

@@ -32,6 +32,12 @@ public sealed class XboxPrefillApi : IDisposable
 
     public string? DisplayName => _xboxManager?.DisplayName;
 
+    /// <summary>True when a long-lived MSA refresh token is stored (the real ~90d login bound).</summary>
+    public bool HasRefreshToken => _xboxManager?.HasRefreshToken ?? false;
+
+    /// <summary>Expiry (UTC) of the short-lived (~16h) XSTS tokens; null when none minted / not logged in.</summary>
+    public DateTime? XstsExpiryUtc => _xboxManager?.XstsExpiryUtc;
+
     /// <summary>
     /// Initializes the API and logs into Xbox.
     /// </summary>
@@ -47,17 +53,9 @@ public sealed class XboxPrefillApi : IDisposable
 
         try
         {
-            var consoleAdapter = new ApiConsoleAdapter(_authProvider, _progress);
+            BuildManager();
 
-            var downloadArgs = new DownloadArguments
-            {
-                Force = false,
-                TransferSpeedUnit = LancachePrefill.Common.Enums.TransferSpeedUnit.Bits
-            };
-
-            _xboxManager = new XboxManager(consoleAdapter, downloadArgs, _authProvider, _progress);
-
-            await _xboxManager.InitializeAsync();
+            await _xboxManager!.InitializeAsync();
             _isInitialized = true;
 
             _progress.OnOperationCompleted("Initializing Xbox connection", timer.Elapsed);
@@ -68,6 +66,50 @@ public sealed class XboxPrefillApi : IDisposable
             _progress.OnError("Failed to initialize Xbox connection", ex);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Non-interactive login: imports a supplied MSA refresh token + device key (PKCS#8) into the
+    /// encrypted store, then mints XSTS tokens. The device-code fallback is suppressed for this path.
+    /// </summary>
+    public async Task InitializeWithImportAsync(string refreshToken, string? deviceKeyPkcs8, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        if (_isInitialized)
+            return;
+
+        _progress.OnOperationStarted("Initializing Xbox connection (imported credentials)");
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+
+        try
+        {
+            BuildManager();
+
+            await _xboxManager!.ImportLoginAsync(refreshToken, deviceKeyPkcs8, cancellationToken);
+            _isInitialized = true;
+
+            _progress.OnOperationCompleted("Initializing Xbox connection (imported credentials)", timer.Elapsed);
+            _progress.OnLog(LogLevel.Info, "Successfully logged into Xbox (non-interactive)");
+        }
+        catch (Exception ex)
+        {
+            _progress.OnError("Failed to initialize Xbox connection from imported credentials", ex);
+            throw;
+        }
+    }
+
+    private void BuildManager()
+    {
+        var consoleAdapter = new ApiConsoleAdapter(_authProvider, _progress);
+
+        var downloadArgs = new DownloadArguments
+        {
+            Force = false,
+            TransferSpeedUnit = LancachePrefill.Common.Enums.TransferSpeedUnit.Bits
+        };
+
+        _xboxManager = new XboxManager(consoleAdapter, downloadArgs, _authProvider, _progress);
     }
 
     /// <summary>

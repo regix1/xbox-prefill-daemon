@@ -32,6 +32,33 @@ namespace XboxPrefill.Handlers
         public string? DisplayName => Account?.DisplayName;
         public string? Xuid => Account?.Xuid;
 
+        /// <summary>
+        /// True when a long-lived MSA refresh token is present. This token (not the short-lived XSTS
+        /// tokens) is the real login bound — it slides ~90 days, so as long as it is stored the daemon
+        /// can re-mint XSTS tokens without an interactive login.
+        /// </summary>
+        public bool HasRefreshToken => !string.IsNullOrEmpty(Account?.RefreshToken);
+
+        /// <summary>
+        /// Expiry of the currently minted XSTS tokens (the earlier of the titlehub / update token expiries).
+        /// This is the short-lived (~16h) bound; null when no tokens have been minted yet.
+        /// </summary>
+        public DateTime? XstsExpiryUtc
+        {
+            get
+            {
+                if (Account == null || string.IsNullOrEmpty(Account.XboxLiveToken) || string.IsNullOrEmpty(Account.UpdateToken))
+                {
+                    return null;
+                }
+
+                var earliest = Account.XboxLiveExpiresAt < Account.UpdateExpiresAt
+                    ? Account.XboxLiveExpiresAt
+                    : Account.UpdateExpiresAt;
+                return DateTime.SpecifyKind(earliest, DateTimeKind.Utc);
+            }
+        }
+
         /// <summary>The titlehub XBL3.0 authorization header (<c>XBL3.0 x={uhs};{token}</c>).</summary>
         public string TitleHubAuthorizationHeader => $"XBL3.0 x={Account!.XboxLiveUhs};{Account.XboxLiveToken}";
 
@@ -90,6 +117,54 @@ namespace XboxPrefill.Handlers
 
                 // Fresh device-code login if there was no refresh token or the refresh failed.
                 accessToken ??= await DeviceCodeLoginAsync(cancellationToken);
+
+                await MintXstsTokensAsync(accessToken, cancellationToken);
+                Save();
+            }
+            finally
+            {
+                _loginLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Imports a supplied MSA refresh token and (optional) device identity key (PKCS#8, base64) into the
+        /// session, persists them to the encrypted store, and mints fresh XSTS tokens — all without ever
+        /// presenting the interactive device-code challenge. Used by the <c>provide-auto-login</c> path so an
+        /// orchestrator can log the daemon in non-interactively using credentials it already holds.
+        /// </summary>
+        public async Task ImportAndLoginAsync(string refreshToken, string deviceKeyPkcs8, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrEmpty(refreshToken))
+            {
+                throw new XboxLoginException("A non-empty MSA refresh token is required for non-interactive login.");
+            }
+
+            await _loginLock.WaitAsync(cancellationToken);
+            try
+            {
+                Account ??= new XboxAccount();
+                Account.RefreshToken = refreshToken;
+
+                // Prefer the caller-supplied device key so the device identity matches what the orchestrator
+                // expects; otherwise EnsureSigner generates and persists a fresh one.
+                if (!string.IsNullOrEmpty(deviceKeyPkcs8))
+                {
+                    Account.DeviceKeyPkcs8 = deviceKeyPkcs8;
+                    _signer = XblRequestSigner.FromPkcs8Base64(deviceKeyPkcs8);
+                }
+
+                EnsureSigner();
+
+                _ansiConsole.LogMarkupLine("Refreshing Xbox access token from imported credentials...");
+                if (!await TryRefreshAccessTokenAsync(refreshToken, cancellationToken))
+                {
+                    // Non-interactive path: never fall back to device-code. Fail loudly instead.
+                    throw new XboxLoginException("The imported MSA refresh token was rejected. Re-import a valid refresh token.");
+                }
+
+                var accessToken = _pendingAccessToken;
+                _pendingAccessToken = null;
 
                 await MintXstsTokensAsync(accessToken, cancellationToken);
                 Save();

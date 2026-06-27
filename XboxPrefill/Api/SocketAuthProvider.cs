@@ -44,6 +44,30 @@ public sealed class SocketAuthProvider : IXboxAuthProvider, IDisposable
     }
 
     /// <summary>
+    /// Issues an encrypted-channel challenge for the non-interactive <c>provide-auto-login</c> flow and
+    /// broadcasts it. Reuses the SAME ECDH + AES-GCM exchange (<see cref="SecureCredentialExchange"/>) the
+    /// interactive device-code flow uses — the client encrypts the refresh token + device key against the
+    /// returned server public key. Returns the challenge so the caller can echo it back to the requester.
+    /// </summary>
+    public async Task<CredentialChallenge> IssueAutoLoginChallengeAsync(CancellationToken cancellationToken = default)
+    {
+        var challenge = SecureCredentialExchange.CreateChallenge("auto-login");
+        _currentChallengeId = challenge.ChallengeId;
+
+        _progress.OnLog(LogLevel.Info, "Issued auto-login challenge (awaiting encrypted refresh token + device key)");
+
+        var challengeEvent = new CredentialChallengeEvent(challenge);
+        await _socketServer.BroadcastCredentialChallengeAsync(challengeEvent, cancellationToken);
+        return challenge;
+    }
+
+    /// <summary>
+    /// Decrypts an encrypted auto-login payload received over the existing secure channel.
+    /// </summary>
+    public string? DecryptAutoLoginPayload(EncryptedCredentialResponse response)
+        => SecureCredentialExchange.DecryptCredential(response);
+
+    /// <summary>
     /// Cancels any pending login challenge.
     /// </summary>
     public void CancelPendingRequest()

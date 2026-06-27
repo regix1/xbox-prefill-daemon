@@ -28,7 +28,8 @@ public sealed class SocketCommandInterface : IDisposable
         "login",
         "status",
         "cancel-login",
-        "provide-credential"
+        "provide-credential",
+        "provide-auto-login"
     };
 
     public SocketCommandInterface(string socketPath)
@@ -94,6 +95,7 @@ public sealed class SocketCommandInterface : IDisposable
                 "cancel-login" => await HandleCancelLoginAsync(request),
                 "cancel-prefill" => HandleCancelPrefill(request),
                 "provide-credential" => HandleProvideCredential(request),
+                "provide-auto-login" => await HandleProvideAutoLoginAsync(request, cancellationToken),
                 "status" => HandleStatus(request),
                 "get-owned-games" => await HandleGetOwnedGamesAsync(request, cancellationToken),
                 "get-cdn-info" => await HandleGetCdnInfoAsync(request, cancellationToken),
@@ -296,6 +298,144 @@ public sealed class SocketCommandInterface : IDisposable
         };
     }
 
+    private async Task<CommandResponse> HandleProvideAutoLoginAsync(CommandRequest request, CancellationToken cancellationToken)
+    {
+        if (_isLoggedIn)
+        {
+            return new CommandResponse
+            {
+                Id = request.Id, Success = true, Message = "Already logged in", CompletedAt = DateTime.UtcNow
+            };
+        }
+
+        var challengeId = request.Parameters?.GetValueOrDefault("challengeId");
+        var clientPublicKey = request.Parameters?.GetValueOrDefault("clientPublicKey");
+        var encryptedCredential = request.Parameters?.GetValueOrDefault("encryptedCredential");
+        var nonce = request.Parameters?.GetValueOrDefault("nonce");
+        var tag = request.Parameters?.GetValueOrDefault("tag");
+
+        // Step 1: no encrypted payload yet — issue a challenge over the existing secure channel and return
+        // the server public key so the caller can encrypt the refresh token + device key against it.
+        if (string.IsNullOrEmpty(encryptedCredential))
+        {
+            var challenge = await _authProvider.IssueAutoLoginChallengeAsync(cancellationToken);
+            return new CommandResponse
+            {
+                Id = request.Id,
+                Success = true,
+                Message = "Auto-login challenge issued - resend provide-auto-login with the encrypted payload",
+                Data = challenge,
+                CompletedAt = DateTime.UtcNow
+            };
+        }
+
+        // Step 2: decrypt the supplied payload using the same ECDH + AES-GCM exchange as interactive auth.
+        if (string.IsNullOrEmpty(challengeId) || string.IsNullOrEmpty(clientPublicKey) ||
+            string.IsNullOrEmpty(nonce) || string.IsNullOrEmpty(tag))
+        {
+            return new CommandResponse
+            {
+                Id = request.Id, Success = false, Error = "Missing required encrypted auto-login parameters", CompletedAt = DateTime.UtcNow
+            };
+        }
+
+        var encResponse = new EncryptedCredentialResponse
+        {
+            ChallengeId = challengeId,
+            ClientPublicKey = clientPublicKey,
+            EncryptedCredential = encryptedCredential,
+            Nonce = nonce,
+            Tag = tag
+        };
+
+        var plaintext = _authProvider.DecryptAutoLoginPayload(encResponse);
+        if (string.IsNullOrEmpty(plaintext))
+        {
+            return new CommandResponse
+            {
+                Id = request.Id, Success = false, Error = "Failed to decrypt auto-login payload (expired or invalid challenge)", CompletedAt = DateTime.UtcNow
+            };
+        }
+
+        AutoLoginPayload? payload;
+        try
+        {
+            payload = JsonSerializer.Deserialize(plaintext, DaemonSerializationContext.Default.AutoLoginPayload);
+        }
+        catch (JsonException ex)
+        {
+            return new CommandResponse
+            {
+                Id = request.Id, Success = false, Error = $"Malformed auto-login payload: {ex.Message}", CompletedAt = DateTime.UtcNow
+            };
+        }
+
+        if (payload == null || string.IsNullOrEmpty(payload.RefreshToken))
+        {
+            return new CommandResponse
+            {
+                Id = request.Id, Success = false, Error = "Auto-login payload missing refreshToken", CompletedAt = DateTime.UtcNow
+            };
+        }
+
+        if (_isLoggingIn)
+        {
+            return new CommandResponse
+            {
+                Id = request.Id, Success = false, Error = "A login is already in progress", CompletedAt = DateTime.UtcNow
+            };
+        }
+
+        _progress.OnLog(LogLevel.Info, "Starting non-interactive auto-login from imported credentials...");
+        _isLoggingIn = true;
+
+        _loginCts?.Dispose();
+        _loginCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+
+        _api = new XboxPrefillApi(_authProvider, _progress);
+
+        var refreshToken = payload.RefreshToken;
+        var deviceKey = payload.DeviceKeyPkcs8;
+
+        _loginTask = Task.Run(async () =>
+        {
+            try
+            {
+                await _api.InitializeWithImportAsync(refreshToken, deviceKey, _loginCts.Token);
+
+                _isLoggedIn = true;
+                _isLoggingIn = false;
+                _progress.OnLog(LogLevel.Info, "Auto-login successful - commands now available");
+
+                await BroadcastStatusAsync("logged-in", "Authenticated and ready for commands", _api.DisplayName);
+            }
+            catch (OperationCanceledException)
+            {
+                _progress.OnLog(LogLevel.Info, "Auto-login cancelled");
+                _isLoggingIn = false;
+                CleanupApiInstance();
+                await BroadcastStatusAsync("awaiting-login", "Auto-login cancelled - ready for new attempt");
+            }
+            catch (Exception ex)
+            {
+                _progress.OnLog(LogLevel.Error, $"Auto-login failed: {ex.Message}");
+                _isLoggingIn = false;
+                CleanupApiInstance();
+                await BroadcastStatusAsync("awaiting-login", $"Auto-login failed: {ex.Message}");
+            }
+            finally
+            {
+                _loginCts?.Dispose();
+                _loginCts = null;
+            }
+        }, _loginCts.Token);
+
+        return new CommandResponse
+        {
+            Id = request.Id, Success = true, Message = "Auto-login started", CompletedAt = DateTime.UtcNow
+        };
+    }
+
     private CommandResponse HandleStatus(CommandRequest request)
     {
         return new CommandResponse
@@ -305,7 +445,13 @@ public sealed class SocketCommandInterface : IDisposable
             Data = new StatusData
             {
                 IsLoggedIn = _isLoggedIn,
-                IsInitialized = _api?.IsInitialized ?? false
+                IsInitialized = _api?.IsInitialized ?? false,
+                // The real login bound is the MSA refresh token (~90d sliding). It carries no persisted
+                // explicit expiry, so AuthExpiryUtc is null unless one is available; the short XSTS expiry
+                // is always surfaced via XstsExpiryUtc while logged in.
+                AuthExpiryUtc = null,
+                XstsExpiryUtc = _isLoggedIn ? _api?.XstsExpiryUtc : null,
+                AccountDisplayName = _isLoggedIn ? _api?.DisplayName : null
             },
             CompletedAt = DateTime.UtcNow
         };
