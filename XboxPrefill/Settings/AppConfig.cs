@@ -162,6 +162,33 @@ namespace XboxPrefill.Settings
             };
         }
 
+        /// <summary>
+        /// How many days a freshly issued or rotated Microsoft (MSA) refresh token is treated as valid before an
+        /// interactive re-login is required. Mirrors Microsoft's real ~90-day sliding refresh-token lifetime for the
+        /// device-code / public-client flow, and is reported as <c>AuthExpiryUtc = lastRefresh + this</c>. This is the
+        /// real token ceiling, not a policy knob (the manager's own login-validity setting is the policy); it is
+        /// exposed here only so the value can be tuned without a code change if Microsoft's behaviour shifts. Override
+        /// with <c>XBOX_REFRESH_TOKEN_VALIDITY_DAYS</c>; clamped to 1-365; defaults to 90. Read once at startup.
+        /// </summary>
+        public static int RefreshTokenValidityDays { get; } =
+            ReadIntEnvironmentVariable("XBOX_REFRESH_TOKEN_VALIDITY_DAYS", defaultWhenUnset: 90, min: 1, max: 365);
+
+        /// <summary>
+        /// Reads a positive integer from an environment variable, clamped to [<paramref name="min"/>,
+        /// <paramref name="max"/>]. An unset, blank, or unparseable value falls back to
+        /// <paramref name="defaultWhenUnset"/>.
+        /// </summary>
+        private static int ReadIntEnvironmentVariable(string variableName, int defaultWhenUnset, int min, int max)
+        {
+            var rawValue = Environment.GetEnvironmentVariable(variableName);
+            if (string.IsNullOrWhiteSpace(rawValue) || !int.TryParse(rawValue.Trim(), out var parsed))
+            {
+                return defaultWhenUnset;
+            }
+
+            return Math.Clamp(parsed, min, max);
+        }
+
         #endregion
     }
 }

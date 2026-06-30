@@ -60,12 +60,13 @@ namespace XboxPrefill.Handlers
         }
 
         /// <summary>
-        /// Expiry of the MSA refresh token (the real ~90d re-login bound): the time it was issued / last
-        /// rotated, plus 90 days. Null when no refresh token has been stamped yet.
+        /// Expiry of the MSA refresh token (the real re-login bound): the time it was issued / last rotated, plus
+        /// <see cref="AppConfig.RefreshTokenValidityDays"/> (default 90, overridable via XBOX_REFRESH_TOKEN_VALIDITY_DAYS).
+        /// Null when no refresh token has been stamped yet.
         /// </summary>
         public DateTime? AuthExpiryUtc =>
             Account?.RefreshTokenIssuedUtc is { } issued
-                ? DateTime.SpecifyKind(issued, DateTimeKind.Utc).AddDays(90)
+                ? DateTime.SpecifyKind(issued, DateTimeKind.Utc).AddDays(AppConfig.RefreshTokenValidityDays)
                 : (DateTime?)null;
 
         /// <summary>The titlehub XBL3.0 authorization header (<c>XBL3.0 x={uhs};{token}</c>).</summary>
