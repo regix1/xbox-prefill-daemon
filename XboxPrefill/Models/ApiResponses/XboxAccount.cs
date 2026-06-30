@@ -11,6 +11,14 @@ namespace XboxPrefill.Models.ApiResponses
         [JsonPropertyName("refresh_token")]
         public string RefreshToken { get; set; }
 
+        /// <summary>
+        /// UTC timestamp at which the current <see cref="RefreshToken"/> was issued / last rotated. The MSA
+        /// refresh token has a ~90-day sliding lifetime, so this stamp + 90 days is the true re-login bound.
+        /// Re-stamped on every device-code login and every rolling refresh.
+        /// </summary>
+        [JsonPropertyName("refresh_token_issued_at")]
+        public DateTime? RefreshTokenIssuedUtc { get; set; }
+
         /// <summary>Gamertag / display name, captured for the UI.</summary>
         [JsonPropertyName("displayName")]
         public string DisplayName { get; set; }

@@ -42,6 +42,9 @@ namespace XboxPrefill
         /// <summary>Expiry (UTC) of the short-lived (~16h) XSTS tokens; null when none minted.</summary>
         public DateTime? XstsExpiryUtc => _accountManager.XstsExpiryUtc;
 
+        /// <summary>Expiry (UTC) of the MSA refresh token (issued + ~90d); null when none stamped.</summary>
+        public DateTime? AuthExpiryUtc => _accountManager.AuthExpiryUtc;
+
         public async Task InitializeAsync()
         {
             await _accountManager.LoginAsync();

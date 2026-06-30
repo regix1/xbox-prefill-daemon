@@ -446,10 +446,10 @@ public sealed class SocketCommandInterface : IDisposable
             {
                 IsLoggedIn = _isLoggedIn,
                 IsInitialized = _api?.IsInitialized ?? false,
-                // The real login bound is the MSA refresh token (~90d sliding). It carries no persisted
-                // explicit expiry, so AuthExpiryUtc is null unless one is available; the short XSTS expiry
-                // is always surfaced via XstsExpiryUtc while logged in.
-                AuthExpiryUtc = null,
+                // The real login bound is the MSA refresh token (~90d sliding). It is stamped on every
+                // login/refresh as (issued time + 90d) and surfaced here; the short XSTS expiry is surfaced
+                // separately via XstsExpiryUtc while logged in.
+                AuthExpiryUtc = _isLoggedIn ? _api?.AuthExpiryUtc : null,
                 XstsExpiryUtc = _isLoggedIn ? _api?.XstsExpiryUtc : null,
                 AccountDisplayName = _isLoggedIn ? _api?.DisplayName : null
             },

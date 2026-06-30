@@ -57,7 +57,9 @@ namespace XboxPrefill.Handlers
         {
             if (_accountManager.TokensAreExpired())
             {
-                await _accountManager.LoginAsync(cancellationToken);
+                // Headless lazy refresh: never fall back to an interactive device-code prompt (nobody can answer
+                // it mid-operation). If the refresh token is dead, LoginAsync throws a clear "re-login required".
+                await _accountManager.LoginAsync(interactive: false, cancellationToken);
             }
 
             return _sharedClient;

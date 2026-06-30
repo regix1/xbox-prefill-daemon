@@ -38,6 +38,9 @@ public sealed class XboxPrefillApi : IDisposable
     /// <summary>Expiry (UTC) of the short-lived (~16h) XSTS tokens; null when none minted / not logged in.</summary>
     public DateTime? XstsExpiryUtc => _xboxManager?.XstsExpiryUtc;
 
+    /// <summary>Expiry (UTC) of the MSA refresh token (issued + ~90d); the real ~90d re-login bound. Null when none stamped / not logged in.</summary>
+    public DateTime? AuthExpiryUtc => _xboxManager?.AuthExpiryUtc;
+
     /// <summary>
     /// Initializes the API and logs into Xbox.
     /// </summary>

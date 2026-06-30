@@ -59,6 +59,15 @@ namespace XboxPrefill.Handlers
             }
         }
 
+        /// <summary>
+        /// Expiry of the MSA refresh token (the real ~90d re-login bound): the time it was issued / last
+        /// rotated, plus 90 days. Null when no refresh token has been stamped yet.
+        /// </summary>
+        public DateTime? AuthExpiryUtc =>
+            Account?.RefreshTokenIssuedUtc is { } issued
+                ? DateTime.SpecifyKind(issued, DateTimeKind.Utc).AddDays(90)
+                : (DateTime?)null;
+
         /// <summary>The titlehub XBL3.0 authorization header (<c>XBL3.0 x={uhs};{token}</c>).</summary>
         public string TitleHubAuthorizationHeader => $"XBL3.0 x={Account!.XboxLiveUhs};{Account.XboxLiveToken}";
 
@@ -83,7 +92,12 @@ namespace XboxPrefill.Handlers
         /// Ensures the account is logged in and the XSTS tokens are fresh. Reuses the stored session when valid,
         /// refreshes via the MSA refresh token when possible, and falls back to a fresh device-code login.
         /// </summary>
-        public async Task LoginAsync(CancellationToken cancellationToken = default)
+        /// <param name="interactive">
+        /// When true (the explicit <c>login</c> command), a failed/absent refresh falls back to an interactive
+        /// device-code login. When false (headless callers such as the lazy token-refresh hook), a failed/absent
+        /// refresh throws instead of dangling on a device-code prompt nobody can answer.
+        /// </param>
+        public async Task LoginAsync(bool interactive = true, CancellationToken cancellationToken = default)
         {
             // Fast-path: no lock needed if tokens are still valid.
             if (!TokensAreExpired())
@@ -115,7 +129,15 @@ namespace XboxPrefill.Handlers
                     }
                 }
 
-                // Fresh device-code login if there was no refresh token or the refresh failed.
+                // Fresh device-code login if there was no refresh token or the refresh failed. Headless callers
+                // (interactive == false) must not dangle on a device-code prompt nobody can answer — fail loudly
+                // so the orchestrator surfaces a clear "re-login required" instead of hanging.
+                if (accessToken == null && !interactive)
+                {
+                    throw new InvalidOperationException(
+                        "Xbox re-login required: the saved Microsoft refresh token is expired or invalid. Log in again.");
+                }
+
                 accessToken ??= await DeviceCodeLoginAsync(cancellationToken);
 
                 await MintXstsTokensAsync(accessToken, cancellationToken);
@@ -145,6 +167,10 @@ namespace XboxPrefill.Handlers
             {
                 Account ??= new XboxAccount();
                 Account.RefreshToken = refreshToken;
+                // The imported token's true issue time is unknown to us, so stamp now. This is conservative:
+                // the reported AuthExpiryUtc (now + 90d) may slightly overstate the real expiry, never understate
+                // it less than the remaining life — re-import resets it. A rolling refresh below re-stamps it.
+                Account.RefreshTokenIssuedUtc = DateTime.UtcNow;
 
                 // Prefer the caller-supplied device key so the device identity matches what the orchestrator
                 // expects; otherwise EnsureSigner generates and persists a fresh one.
@@ -204,6 +230,8 @@ namespace XboxPrefill.Handlers
             var msaToken = await PollForTokenAsync(deviceCode, cancellationToken);
             Account ??= new XboxAccount();
             Account.RefreshToken = msaToken.RefreshToken;
+            // Fresh refresh token just issued — stamp now so AuthExpiryUtc reports issued + 90d.
+            Account.RefreshTokenIssuedUtc = DateTime.UtcNow;
             return msaToken.AccessToken;
         }
 
@@ -289,6 +317,8 @@ namespace XboxPrefill.Handlers
                 if (token.RefreshToken != null)
                 {
                     Account!.RefreshToken = token.RefreshToken;
+                    // Rolling refresh token rotated — re-stamp so the 90d sliding window restarts from now.
+                    Account.RefreshTokenIssuedUtc = DateTime.UtcNow;
                 }
 
                 // Cache the access token on the instance so MintXstsTokensAsync can read it.
