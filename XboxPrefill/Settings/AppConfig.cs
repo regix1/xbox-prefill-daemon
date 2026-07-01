@@ -93,6 +93,34 @@ namespace XboxPrefill.Settings
         public const string DisplayCatalogBaseUrl = "https://displaycatalog.mp.microsoft.com";
         public const string PackageServiceBaseUrl = "https://packagespc.xboxlive.com/GetBasePackage/";
 
+        /// <summary>
+        /// Microsoft's public, unofficial "Most played games" storefront listing for Xbox - store-wide
+        /// ranking, not per-account, and anonymous (no XSTS token needed). No documented JSON API is known
+        /// to back this list, so <see cref="Handlers.XboxTrendingTitlesProvider"/> parses the server-rendered
+        /// HTML directly; see that class for the graceful-degradation behavior if Microsoft changes the page.
+        /// </summary>
+        public const string MostPlayedGamesPageUrl = "https://www.microsoft.com/en-us/store/most-popular/games/xbox";
+
+        #endregion
+
+        #region Recent / Top preset limits
+
+        /// <summary>
+        /// Max number of titles selected for the "Recent" prefill preset (most-recently-played owned/Game
+        /// Pass titles, per Xbox Live's title history). Override with <c>XBOX_RECENT_TITLES_LIMIT</c>;
+        /// clamped 1-100; defaults to 10.
+        /// </summary>
+        public static int RecentTitlesLimit { get; } =
+            ReadIntEnvironmentVariable("XBOX_RECENT_TITLES_LIMIT", defaultWhenUnset: 10, min: 1, max: 100);
+
+        /// <summary>
+        /// Max number of ranked titles requested from <see cref="MostPlayedGamesPageUrl"/> for the "Top"
+        /// prefill preset, before intersecting with the account's owned/Game Pass library. Override with
+        /// <c>XBOX_TOP_TITLES_LIMIT</c>; clamped 1-100; defaults to 25.
+        /// </summary>
+        public static int TopTitlesLimit { get; } =
+            ReadIntEnvironmentVariable("XBOX_TOP_TITLES_LIMIT", defaultWhenUnset: 25, min: 1, max: 100);
+
         #endregion
 
         #region Debugging

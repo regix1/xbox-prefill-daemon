@@ -32,11 +32,31 @@ namespace XboxPrefill.Models.ApiResponses
 
         [JsonPropertyName("gamePass")]
         public TitleHubGamePass GamePass { get; set; }
+
+        /// <summary>Play-recency metadata, present only when the <c>titleHistory</c> decoration is requested.</summary>
+        [JsonPropertyName("titleHistory")]
+        public TitleHubTitleHistory TitleHistory { get; set; }
     }
 
     public sealed class TitleHubGamePass
     {
         [JsonPropertyName("isGamePass")]
         public bool IsGamePass { get; set; }
+    }
+
+    /// <summary>
+    /// Per-title play recency, returned by titlehub when the <c>titleHistory</c> decoration is requested
+    /// (see <see cref="Handlers.XboxApi.GetOwnedTitlesAsync"/>).
+    /// </summary>
+    public sealed class TitleHubTitleHistory
+    {
+        [JsonPropertyName("lastTimePlayed")]
+        public DateTimeOffset? LastTimePlayed { get; set; }
+
+        [JsonPropertyName("visible")]
+        public bool Visible { get; set; }
+
+        [JsonPropertyName("canHide")]
+        public bool CanHide { get; set; }
     }
 }

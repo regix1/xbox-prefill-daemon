@@ -566,6 +566,10 @@ public sealed class SocketCommandInterface : IDisposable
                 options.DownloadAllOwnedGames = all;
             if (bool.TryParse(request.Parameters.GetValueOrDefault("force"), out var force))
                 options.Force = force;
+            if (bool.TryParse(request.Parameters.GetValueOrDefault("recent"), out var recent))
+                options.Recent = recent;
+            if (bool.TryParse(request.Parameters.GetValueOrDefault("top"), out var top))
+                options.Top = top;
 
             // Optional explicit Store ProductIds (manual entry); these flow through to manualIds and may be IDs
             // that aren't present in the titlehub-owned library.

@@ -13,6 +13,7 @@ namespace XboxPrefill
         private readonly ManifestHandler _manifestHandler;
         private readonly XboxAccountManager _accountManager;
         private readonly HttpClientFactory _httpClientFactory;
+        private readonly XboxTrendingTitlesProvider _trendingTitlesProvider;
 
         private readonly PrefillSummaryResult _prefillSummaryResult = new PrefillSummaryResult();
 
@@ -32,6 +33,7 @@ namespace XboxPrefill
             _httpClientFactory = new HttpClientFactory(_ansiConsole, _accountManager);
             _xboxApi = new XboxApi(_ansiConsole, _httpClientFactory);
             _manifestHandler = new ManifestHandler(_ansiConsole, _xboxApi);
+            _trendingTitlesProvider = new XboxTrendingTitlesProvider(_ansiConsole, _httpClientFactory.AnonymousClient);
         }
 
         public string? DisplayName => _accountManager.DisplayName;
@@ -59,7 +61,13 @@ namespace XboxPrefill
             await _accountManager.ImportAndLoginAsync(refreshToken, deviceKeyPkcs8, cancellationToken);
         }
 
-        public async Task DownloadMultipleAppsAsync(bool downloadAllOwnedGames, bool force = false, List<string> manualIds = null, CancellationToken cancellationToken = default)
+        public async Task DownloadMultipleAppsAsync(
+            bool downloadAllOwnedGames,
+            bool force = false,
+            List<string> manualIds = null,
+            bool recent = false,
+            bool top = false,
+            CancellationToken cancellationToken = default)
         {
             var allOwnedGames = await GetAvailableGamesAsync();
 
@@ -71,6 +79,14 @@ namespace XboxPrefill
             if (downloadAllOwnedGames)
             {
                 appIdsToDownload = allOwnedGames.Select(e => e.AppId).ToList();
+            }
+            else if (recent)
+            {
+                appIdsToDownload = SelectRecentlyPlayedAppIds(allOwnedGames);
+            }
+            else if (top)
+            {
+                appIdsToDownload = await SelectTopTitleAppIdsAsync(allOwnedGames, cancellationToken);
             }
 
             // Manual ProductIds may not appear in the titlehub library - prefill them directly.
@@ -131,6 +147,58 @@ namespace XboxPrefill
                 TotalBytesTransferred = (long)_prefillSummaryResult.TotalBytesTransferred.Bytes,
                 TotalTime = _prefillSummaryResult.PrefillElapsedTime.Elapsed
             });
+        }
+
+        /// <summary>
+        /// Owned/Game Pass titles with Xbox Live title-history data, newest-played first, capped at
+        /// <see cref="AppConfig.RecentTitlesLimit"/>. Titles Xbox Live never reported a
+        /// <see cref="AppInfo.LastTimePlayed"/> for (never played, or history not visible) are excluded
+        /// rather than sorted to the end, since "recent" implies an actual play event.
+        /// </summary>
+        private static List<string> SelectRecentlyPlayedAppIds(List<AppInfo> allOwnedGames)
+        {
+            return allOwnedGames
+                .Where(g => g.LastTimePlayed.HasValue)
+                .OrderByDescending(g => g.LastTimePlayed.Value)
+                .Take(AppConfig.RecentTitlesLimit)
+                .Select(g => g.AppId)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Intersects Microsoft's public "most played" storefront ranking with the account's owned/Game Pass
+        /// library (only entitled titles are actually downloadable), ordered by that external rank. Falls
+        /// back to every owned game - loudly logged, never silently - if the ranking is unavailable or none
+        /// of it matches anything owned, since "Top" must never silently prefill zero games.
+        /// </summary>
+        private async Task<List<string>> SelectTopTitleAppIdsAsync(List<AppInfo> allOwnedGames, CancellationToken cancellationToken)
+        {
+            var trendingProductIds = await _trendingTitlesProvider.GetTrendingProductIdsAsync(AppConfig.TopTitlesLimit, cancellationToken);
+            if (trendingProductIds.Count == 0)
+            {
+                _progress.OnLog(LogLevel.Warning, "Could not retrieve Microsoft's most-played games list; falling back to all owned games for the \"Top\" prefill.");
+                return allOwnedGames.Select(e => e.AppId).ToList();
+            }
+
+            var rank = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < trendingProductIds.Count; i++)
+            {
+                rank.TryAdd(trendingProductIds[i], i);
+            }
+
+            var rankedOwnedAppIds = allOwnedGames
+                .Where(g => rank.ContainsKey(g.AppId))
+                .OrderBy(g => rank[g.AppId])
+                .Select(g => g.AppId)
+                .ToList();
+
+            if (rankedOwnedAppIds.Count == 0)
+            {
+                _progress.OnLog(LogLevel.Warning, "None of Microsoft's currently most-played games are in your owned/Game Pass library; falling back to all owned games for the \"Top\" prefill.");
+                return allOwnedGames.Select(e => e.AppId).ToList();
+            }
+
+            return rankedOwnedAppIds;
         }
 
         private async Task DownloadSingleAppAsync(AppInfo app, bool force = false, CancellationToken cancellationToken = default)
@@ -210,7 +278,8 @@ namespace XboxPrefill
             {
                 AppId = title.ProductId,
                 Title = title.Name ?? title.ProductId,
-                Pfn = title.Pfn
+                Pfn = title.Pfn,
+                LastTimePlayed = title.TitleHistory?.LastTimePlayed
             }).ToList();
 
             return ownedApps.OrderBy(e => e.Title, StringComparer.OrdinalIgnoreCase).ToList();

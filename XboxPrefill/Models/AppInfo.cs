@@ -18,6 +18,10 @@ namespace XboxPrefill.Models
 
         public string Title { get; set; }
 
+        /// <summary>When the account last played this title, per Xbox Live's title history. Null when never
+        /// played, or when titlehub reported no history for it.</summary>
+        public DateTimeOffset? LastTimePlayed { get; set; }
+
         public override string ToString()
         {
             if (Title == null)

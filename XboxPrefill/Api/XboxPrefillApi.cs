@@ -409,6 +409,8 @@ public sealed class XboxPrefillApi : IDisposable
                 downloadAllOwnedGames: options.DownloadAllOwnedGames,
                 force: options.Force,
                 manualIds: options.ProductIds is { Count: > 0 } ? options.ProductIds : null,
+                recent: options.Recent,
+                top: options.Top,
                 cancellationToken: cancellationToken);
 
             _progress.OnOperationCompleted("Prefill operation", timer.Elapsed);
@@ -532,6 +534,12 @@ public class PrefillOptions
 {
     public bool DownloadAllOwnedGames { get; set; }
     public bool Force { get; set; }
+
+    /// <summary>Prefill the account's most-recently-played owned/Game Pass titles (Xbox Live title history).</summary>
+    public bool Recent { get; set; }
+
+    /// <summary>Prefill owned/Game Pass titles that also appear on Microsoft's public "most played" ranking.</summary>
+    public bool Top { get; set; }
 
     /// <summary>
     /// Explicit Store ProductIds to prefill, in addition to the previously-selected apps. These may be IDs that

@@ -33,7 +33,9 @@ namespace XboxPrefill.Handlers
                 throw new XboxLoginException("No Xbox user id available. Login may have failed.");
             }
 
-            var url = $"{AppConfig.TitleHubBaseUrl}/users/xuid({xuid})/titles/titlehistory/decoration/detail,image,productId,gamepass";
+            // "titleHistory" adds a per-title lastTimePlayed/visible/canHide block (xbox-webapi-python's
+            // TitlehubProvider models this as recently-played metadata); needed to back the "Recent" preset.
+            var url = $"{AppConfig.TitleHubBaseUrl}/users/xuid({xuid})/titles/titlehistory/decoration/detail,image,productId,gamepass,titleHistory";
 
             // Refresh the token FIRST, then read the (now-fresh) authorization header.
             var httpClient = await _httpClientFactory.GetHttpClientAsync();
