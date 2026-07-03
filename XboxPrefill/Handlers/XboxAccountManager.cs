@@ -33,6 +33,14 @@ namespace XboxPrefill.Handlers
         public string? Xuid => Account?.Xuid;
 
         /// <summary>
+        /// Drops the in-memory MSA refresh token and XSTS token state so it cannot outlive a
+        /// logout. The persisted store file is deleted separately by the daemon's logout handler;
+        /// this clears the copy already held by this manager instance so a mid-login orphan that
+        /// finishes late can't keep serving it either.
+        /// </summary>
+        public void ClearAccount() => Account = null;
+
+        /// <summary>
         /// True when a long-lived MSA refresh token is present. This token (not the short-lived XSTS
         /// tokens) is the real login bound — it slides ~90 days, so as long as it is stored the daemon
         /// can re-mint XSTS tokens without an interactive login.

@@ -18,6 +18,7 @@ namespace XboxPrefill.Test
     /// neither AppConfig nor XboxAccountManager accept a path override; storage.key and the account file are
     /// deleted before/after every test so runs don't collide with each other or leave residue.
     /// </summary>
+    [Collection("XboxAccountFile")]
     public sealed class TokenStorageEncryptionTests : IDisposable
     {
         private static readonly string KeyPath = Path.Combine(AppConfig.ConfigDir, "storage.key");

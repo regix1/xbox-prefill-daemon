@@ -47,6 +47,9 @@ namespace XboxPrefill
         /// <summary>Expiry (UTC) of the MSA refresh token (issued + ~90d); null when none stamped.</summary>
         public DateTime? AuthExpiryUtc => _accountManager.AuthExpiryUtc;
 
+        /// <summary>Drops the in-memory MSA/XSTS token state. See <see cref="XboxAccountManager.ClearAccount"/>.</summary>
+        public void ClearAccount() => _accountManager.ClearAccount();
+
         public async Task InitializeAsync()
         {
             await _accountManager.LoginAsync();

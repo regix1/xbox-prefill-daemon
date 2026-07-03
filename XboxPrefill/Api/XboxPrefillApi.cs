@@ -504,6 +504,11 @@ public sealed class XboxPrefillApi : IDisposable
 
     public void Shutdown()
     {
+        // Unconditional (not gated on _isInitialized): _xboxManager is constructed synchronously
+        // before the MSA/XSTS login handshake completes, so a logout racing a mid-login task must
+        // still be able to drop the in-memory token state even though _isInitialized never
+        // flipped true.
+        _xboxManager?.ClearAccount();
         _isInitialized = false;
         _progress.OnLog(LogLevel.Info, "Disconnected from Xbox");
     }
