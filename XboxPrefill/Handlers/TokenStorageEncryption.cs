@@ -2,8 +2,9 @@ namespace XboxPrefill.Handlers
 {
     /// <summary>
     /// Provides AES-256-GCM encryption for token storage on disk.
-    /// The encryption key is derived from the machine name using HKDF, scoping
-    /// decryption to the machine where the token was originally saved.
+    /// The encryption key is derived via HKDF from a random key file stored next to the account
+    /// file on the persistent config volume, so decryption survives container recreation (unlike
+    /// a per-container hostname or socket secret, neither of which is stable across containers).
     ///
     /// Stored format: "ENC:" + Base64( nonce[12] + ciphertext[N] + tag[16] )
     /// </summary>
@@ -86,35 +87,162 @@ namespace XboxPrefill.Handlers
         }
 
         /// <summary>
-        /// Derives a 256-bit key for token storage.
-        /// When <c>PREFILL_SOCKET_SECRET</c> is set it is used as the IKM (input key material), scoping
-        /// decryption to holders of that secret. The machine name is mixed in as HKDF salt so that a leaked
-        /// secret alone cannot decrypt tokens from a different host.
-        /// When the env var is absent the machine name is used as IKM (legacy behaviour — not a secret,
-        /// but still scopes decryption to this host).
+        /// Derives a 256-bit key for token storage via HKDF-SHA256 from a random key file kept next to the
+        /// account file on the persistent /app/Config volume. Neither <c>PREFILL_SOCKET_SECRET</c> nor
+        /// <c>Environment.MachineName</c> participate: both are regenerated per-container, which previously
+        /// made every stored token undecryptable by the next container.
         /// </summary>
         private static byte[] DeriveKey()
         {
-            var socketSecret = Environment.GetEnvironmentVariable("PREFILL_SOCKET_SECRET");
-            byte[] ikm;
-            byte[] salt;
-
-            if (!string.IsNullOrEmpty(socketSecret))
+            byte[] ikm = LoadOrCreateKeyFile();
+            try
             {
-                // IKM = the socket secret (an actual secret); salt = machine name (host-scoping).
-                ikm = Encoding.UTF8.GetBytes(socketSecret);
-                salt = Encoding.UTF8.GetBytes(Environment.MachineName);
+                return HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, KeySize, salt: null,
+                    info: Encoding.UTF8.GetBytes(PurposeLabel));
             }
-            else
+            finally
             {
-                // Fallback: machine name only (not a secret — scopes decryption to this host).
-                ikm = Encoding.UTF8.GetBytes(Environment.MachineName);
-                salt = Array.Empty<byte>();
+                CryptographicOperations.ZeroMemory(ikm);
+            }
+        }
+
+        /// <summary>
+        /// Key material lives NEXT TO the account file on the persistent /app/Config volume, so it survives
+        /// container recreation (hostname and socket secret do not).
+        ///
+        /// Creation is exclusive (FileMode.CreateNew) so two containers racing on the same shared
+        /// volume can never both "win" and last-writer-wins each other's key - the loser instead reads
+        /// back whatever the winner wrote. A corrupt (non-Base64), wrong-length, or missing key file is
+        /// regenerated rather than thrown on; any account file it previously protected becomes
+        /// undecryptable, which the guarded Decrypt call sites discard.
+        /// </summary>
+        private static byte[] LoadOrCreateKeyFile()
+        {
+            string keyPath = Path.Combine(AppConfig.ConfigDir, "storage.key");
+
+            var existing = TryReadValidKeyFile(keyPath);
+            if (existing != null)
+            {
+                return existing;
             }
 
-            return HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, KeySize,
-                salt: salt,
-                info: Encoding.UTF8.GetBytes(PurposeLabel));
+            // Either missing, or present-but-invalid (corrupt/wrong-length/torn write). In the invalid
+            // case, clear it first so the exclusive create below isn't permanently blocked by known-bad
+            // content - safe because we already established that content is unusable to any reader.
+            if (File.Exists(keyPath))
+            {
+                try { File.Delete(keyPath); } catch { /* another writer may already be replacing it */ }
+            }
+
+            var key = new byte[KeySize];
+            RandomNumberGenerator.Fill(key);
+
+            if (TryCreateKeyFileExclusive(keyPath, key))
+            {
+                return key;
+            }
+
+            // Lost the exclusive-create race to another process/container sharing this volume (or the
+            // file appeared between our initial read attempt and here). Defer to whatever the winner
+            // wrote so every writer converges on ONE key instead of last-writer-wins; a brief
+            // write-in-progress window is covered by a few short retries before giving up.
+            CryptographicOperations.ZeroMemory(key);
+            for (var attempt = 0; attempt < 5; attempt++)
+            {
+                var winner = TryReadValidKeyFile(keyPath);
+                if (winner != null)
+                {
+                    return winner;
+                }
+                Thread.Sleep(20);
+            }
+
+            throw new InvalidOperationException($"Unable to read or create the token storage key file at '{keyPath}'.");
+        }
+
+        /// <summary>
+        /// Reads and validates the key file: must be valid Base64 decoding to exactly <see cref="KeySize"/>
+        /// bytes. Returns null (never throws) for "file missing", "corrupt Base64", "wrong length"
+        /// (e.g. a torn/partial write), "read raced a concurrent writer", or "unreadable due to file
+        /// permissions" - all treated identically by the caller (regenerate or retry; the unconditional
+        /// delete-before-recreate step in <see cref="LoadOrCreateKeyFile"/> best-effort clears an
+        /// unreadable file the same way it clears a corrupt one).
+        /// </summary>
+        private static byte[]? TryReadValidKeyFile(string keyPath)
+        {
+            if (!File.Exists(keyPath))
+            {
+                return null;
+            }
+
+            try
+            {
+                var key = System.Convert.FromBase64String(File.ReadAllText(keyPath).Trim());
+                return key.Length == KeySize ? key : null;
+            }
+            catch (FormatException)
+            {
+                return null;
+            }
+            catch (IOException)
+            {
+                return null;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Atomically creates the key file exclusively (fails if it already exists), so a partial
+        /// write is never visible to another reader: either the whole file is created with its full
+        /// content, or creation fails and any partially-written bytes are deleted. Returns false
+        /// (without throwing) when another writer already created the file first.
+        /// </summary>
+        private static bool TryCreateKeyFileExclusive(string keyPath, byte[] key)
+        {
+            var stream = TryOpenKeyFileExclusive(keyPath);
+            if (stream == null)
+            {
+                // Another writer already created the file first (or it appeared between our initial
+                // read attempt and here) - not our file to touch; the caller reads back whatever the
+                // winner wrote.
+                return false;
+            }
+
+            try
+            {
+                using (stream)
+                {
+                    var bytes = Encoding.UTF8.GetBytes(System.Convert.ToBase64String(key));
+                    stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
+            }
+            catch
+            {
+                // Partial write - remove the corrupt file WE just created rather than leaving it for
+                // the next reader to trip over. TryReadValidKeyFile's length/Base64 checks protect
+                // every future reader even if this best-effort delete itself fails.
+                try { File.Delete(keyPath); } catch { /* best effort */ }
+                throw;
+            }
+
+            SetRestrictivePermissions(keyPath);
+            return true;
+        }
+
+        private static FileStream? TryOpenKeyFileExclusive(string keyPath)
+        {
+            try
+            {
+                return new FileStream(keyPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            }
+            catch (IOException)
+            {
+                return null;
+            }
         }
 
         /// <summary>

@@ -483,8 +483,26 @@ namespace XboxPrefill.Handlers
             var rawContent = File.ReadAllText(AppConfig.AccountSettingsStorePath).Trim();
             if (TokenStorageEncryption.IsEncrypted(rawContent))
             {
-                var json = TokenStorageEncryption.Decrypt(rawContent);
-                manager.Account = JsonSerializer.Deserialize(json, SerializationContext.Default.XboxAccount);
+                try
+                {
+                    var json = TokenStorageEncryption.Decrypt(rawContent);
+                    manager.Account = JsonSerializer.Deserialize(json, SerializationContext.Default.XboxAccount);
+                }
+                catch (CryptographicException)
+                {
+                    // Store was encrypted under a key this container cannot reproduce (pre-key-file
+                    // build, or a lost key file). Discard and start fresh - the user must log in again
+                    // once; afterwards the key travels with the volume.
+                    ansiConsole.LogMarkupLine("Stored Xbox credentials could not be decrypted; discarded stale token store, please log in again.");
+                    try
+                    {
+                        File.Delete(AppConfig.AccountSettingsStorePath);
+                    }
+                    catch (Exception)
+                    {
+                        // Deletion is best-effort; a fresh Save() overwrites it anyway.
+                    }
+                }
             }
             else
             {
