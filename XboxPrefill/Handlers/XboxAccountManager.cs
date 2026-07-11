@@ -308,9 +308,13 @@ namespace XboxPrefill.Handlers
 
         private async Task<bool> TryRefreshAccessTokenAsync(string refreshToken, CancellationToken cancellationToken)
         {
+            // The legacy login.live.com refresh grant REQUIRES the scope parameter (the same MBI_SSL scope
+            // the refresh token was issued under). Omitting it makes the endpoint return invalid_scope, so a
+            // saved login cannot be restored across restarts. See the msndevs MSA protocol docs.
             var form = new Dictionary<string, string>
             {
                 { "client_id", AppConfig.ClientId },
+                { "scope", AppConfig.AuthScope },
                 { "grant_type", "refresh_token" },
                 { "refresh_token", refreshToken }
             };
