@@ -128,7 +128,7 @@ public sealed class XboxPrefillApi : IDisposable
 
         try
         {
-            var apps = await _xboxManager!.GetAvailableGamesAsync();
+            var apps = await _xboxManager!.GetAvailableGamesAsync(cancellationToken);
             var result = apps.Select(a => new OwnedGame
             {
                 AppId = a.AppId,
@@ -137,6 +137,10 @@ public sealed class XboxPrefillApi : IDisposable
 
             _progress.OnOperationCompleted("Fetching owned games", timer.Elapsed);
             return result;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -160,7 +164,7 @@ public sealed class XboxPrefillApi : IDisposable
 
         try
         {
-            var allGames = await _xboxManager!.GetAvailableGamesAsync();
+            var allGames = await _xboxManager!.GetAvailableGamesAsync(cancellationToken);
 
             // Filter to requested appIds if provided. Manually-entered ProductIds may not be in the owned library;
             // synthesize an AppInfo for those so they are still resolved rather than silently dropped.
@@ -177,11 +181,11 @@ public sealed class XboxPrefillApi : IDisposable
             var results = new List<CdnInfo>();
             foreach (var app in allGames)
             {
-                if (cancellationToken.IsCancellationRequested) break;
+                cancellationToken.ThrowIfCancellationRequested();
 
                 try
                 {
-                    var manifest = await _xboxManager.GetManifestDownloadUrlAsync(app);
+                    var manifest = await _xboxManager.GetManifestDownloadUrlAsync(app, cancellationToken);
                     results.Add(new CdnInfo
                     {
                         AppId = app.AppId,
@@ -194,6 +198,10 @@ public sealed class XboxPrefillApi : IDisposable
                     // Opt-in [MAP] diagnostics: log the exact /filestreamingservice/files/<GUID> fragments this app
                     // emits for naming, so they can be compared against the GUIDs the daemon later requests.
                     MappingDebugLogger.LogCdnInfoEmit(_progress, app.Title, app.AppId, manifest.ManifestDownloadUri.Host, manifest.FilePathFragments);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -208,6 +216,10 @@ public sealed class XboxPrefillApi : IDisposable
                 Apps = results,
                 Message = $"Retrieved CDN info for {results.Count} of {allGames.Count} games"
             };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -254,7 +266,7 @@ public sealed class XboxPrefillApi : IDisposable
 
         try
         {
-            var allGames = await _xboxManager!.GetAvailableGamesAsync();
+            var allGames = await _xboxManager!.GetAvailableGamesAsync(cancellationToken);
             var gamesByAppId = allGames.ToDictionary(g => g.AppId, g => g);
 
             var apps = new List<AppStatus>();
@@ -276,7 +288,11 @@ public sealed class XboxPrefillApi : IDisposable
                 {
                     try
                     {
-                        downloadSize = await _xboxManager.GetAppDownloadSizeAsync(game);
+                        downloadSize = await _xboxManager.GetAppDownloadSizeAsync(game, cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -299,6 +315,10 @@ public sealed class XboxPrefillApi : IDisposable
                 Apps = apps,
                 TotalDownloadSize = totalDownloadSize
             };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -332,7 +352,7 @@ public sealed class XboxPrefillApi : IDisposable
 
         try
         {
-            var allGames = await _xboxManager!.GetAvailableGamesAsync();
+            var allGames = await _xboxManager!.GetAvailableGamesAsync(cancellationToken);
             var gamesByAppId = allGames.ToDictionary(g => g.AppId, g => g);
 
             var apps = new List<AppCacheStatus>();
@@ -358,6 +378,10 @@ public sealed class XboxPrefillApi : IDisposable
                 Apps = apps,
                 Message = $"Checked {apps.Count} apps"
             };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -413,6 +437,7 @@ public sealed class XboxPrefillApi : IDisposable
                 top: options.Top,
                 cancellationToken: cancellationToken);
 
+            cancellationToken.ThrowIfCancellationRequested();
             _progress.OnOperationCompleted("Prefill operation", timer.Elapsed);
 
             return new PrefillResult
@@ -421,25 +446,15 @@ public sealed class XboxPrefillApi : IDisposable
                 TotalTime = timer.Elapsed
             };
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             _progress.OnLog(LogLevel.Info, "Prefill operation cancelled");
-            return new PrefillResult
-            {
-                Success = false,
-                ErrorMessage = "Prefill cancelled",
-                TotalTime = timer.Elapsed
-            };
+            throw;
         }
         catch (Exception ex)
         {
             _progress.OnError("Prefill operation failed", ex);
-            return new PrefillResult
-            {
-                Success = false,
-                ErrorMessage = ex.Message,
-                TotalTime = timer.Elapsed
-            };
+            throw;
         }
     }
 

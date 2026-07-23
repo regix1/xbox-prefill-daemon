@@ -72,7 +72,7 @@ namespace XboxPrefill
             bool top = false,
             CancellationToken cancellationToken = default)
         {
-            var allOwnedGames = await GetAvailableGamesAsync();
+            var allOwnedGames = await GetAvailableGamesAsync(cancellationToken);
 
             var appIdsToDownload = LoadPreviouslySelectedApps();
             if (manualIds != null)
@@ -137,6 +137,7 @@ namespace XboxPrefill
                 }
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             _ansiConsole.LogMarkupLine("Prefill complete!");
             _prefillSummaryResult.RenderSummaryTable(_ansiConsole);
 
@@ -212,9 +213,13 @@ namespace XboxPrefill
             PackageManifest manifest;
             try
             {
-                manifest = await _manifestHandler.ResolvePackageAsync(app);
+                manifest = await _manifestHandler.ResolvePackageAsync(app, cancellationToken);
                 app.BuildVersion = manifest.Version;
                 _progress.OnLog(LogLevel.Info, $"Resolved package for {app.Title}: version {manifest.Version}, CDN host {manifest.CdnHost}");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -273,9 +278,9 @@ namespace XboxPrefill
         /// <summary>
         /// Returns the account's prefillable titles (MS-Store/Xbox titles from titlehub).
         /// </summary>
-        public async Task<List<AppInfo>> GetAvailableGamesAsync()
+        public async Task<List<AppInfo>> GetAvailableGamesAsync(CancellationToken cancellationToken = default)
         {
-            var ownedTitles = await _xboxApi.GetOwnedTitlesAsync();
+            var ownedTitles = await _xboxApi.GetOwnedTitlesAsync(cancellationToken);
 
             var ownedApps = ownedTitles.Select(title => new AppInfo
             {
@@ -296,14 +301,18 @@ namespace XboxPrefill
         /// <summary>
         /// Resolves the package manifest for an app, which carries the CDN host + download queue.
         /// </summary>
-        public async Task<PackageManifest> GetManifestDownloadUrlAsync(AppInfo app)
+        public async Task<PackageManifest> GetManifestDownloadUrlAsync(
+            AppInfo app,
+            CancellationToken cancellationToken = default)
         {
-            return await _manifestHandler.ResolvePackageAsync(app);
+            return await _manifestHandler.ResolvePackageAsync(app, cancellationToken);
         }
 
-        public async Task<long> GetAppDownloadSizeAsync(AppInfo app)
+        public async Task<long> GetAppDownloadSizeAsync(
+            AppInfo app,
+            CancellationToken cancellationToken = default)
         {
-            var manifest = await _manifestHandler.ResolvePackageAsync(app);
+            var manifest = await _manifestHandler.ResolvePackageAsync(app, cancellationToken);
             return manifest.QueuedRequests.Sum(e => (long)e.DownloadSizeBytes);
         }
 

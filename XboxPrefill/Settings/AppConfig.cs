@@ -159,14 +159,13 @@ namespace XboxPrefill.Settings
         /// fragments that <c>get-cdn-info</c> emits for naming and, per file, the GUID actually requested through
         /// lancache plus the CDN response status, so a human can confirm the emitted GUID matches the requested one.
         /// <para>
-        /// ON by default — the manager spawns the daemon container, so an operator cannot set per-container env
-        /// vars; defaulting on makes the mapping trace available without any configuration. The logging is per-app
-        /// and per-file (NOT per 1 MB slice), so it stays low-volume. Set the <c>XBOX_DEBUG_MAPPING</c> environment
-        /// variable to a falsy value (<c>0</c>/<c>false</c>/<c>no</c>/<c>off</c>, case-insensitive) to disable it;
-        /// read once at startup.
+        /// Disabled by default. Set <c>XBOX_DEBUG_MAPPING</c> to a truthy value
+        /// (<c>1</c>/<c>true</c>/<c>yes</c>/<c>on</c>, case-insensitive) to enable it. The current environment value
+        /// is read whenever the diagnostics gate is queried.
         /// </para>
         /// </summary>
-        public static bool DebugMapping { get; } = ReadBooleanEnvironmentVariable("XBOX_DEBUG_MAPPING", defaultWhenUnset: true);
+        public static bool DebugMapping
+            => ReadBooleanEnvironmentVariable("XBOX_DEBUG_MAPPING", defaultWhenUnset: false);
 
         /// <summary>
         /// Reads a boolean switch from an environment variable. An unset, blank, or unrecognised value falls back to

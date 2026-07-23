@@ -46,6 +46,28 @@ namespace XboxPrefill.Handlers
             AnonymousClient.DefaultRequestHeaders.Add("User-Agent", AppConfig.DefaultUserAgent);
         }
 
+        internal HttpClientFactory(
+            IAnsiConsole ansiConsole,
+            XboxAccountManager accountManager,
+            HttpMessageHandler sharedHandler,
+            HttpMessageHandler anonymousHandler)
+        {
+            _ansiConsole = ansiConsole;
+            _accountManager = accountManager;
+
+            _sharedClient = new HttpClient(sharedHandler)
+            {
+                Timeout = AppConfig.DefaultRequestTimeout
+            };
+            _sharedClient.DefaultRequestHeaders.Add("User-Agent", AppConfig.DefaultUserAgent);
+
+            AnonymousClient = new HttpClient(anonymousHandler)
+            {
+                Timeout = AppConfig.DefaultRequestTimeout
+            };
+            AnonymousClient.DefaultRequestHeaders.Add("User-Agent", AppConfig.DefaultUserAgent);
+        }
+
         public XboxAccountManager AccountManager => _accountManager;
 
         /// <summary>

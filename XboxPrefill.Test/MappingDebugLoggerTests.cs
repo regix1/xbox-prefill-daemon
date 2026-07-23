@@ -9,8 +9,23 @@ namespace XboxPrefill.Test
     /// sides are formatted identically, so <see cref="MappingDebugLogger.ToFragment"/> must strip the CDN signature
     /// query string exactly the way <see cref="XboxPrefill.Handlers.ManifestHandler.CollectFilePathFragments"/> does.
     /// </summary>
+    [Collection("ProcessEnvironment")]
     public sealed class MappingDebugLoggerTests
     {
+        private const string DebugMappingVariable = "XBOX_DEBUG_MAPPING";
+
+        [Fact]
+        public void Enabled_WhenEnvironmentIsUnset_IsFalse()
+        {
+            Assert.False(ReadEnabledWithEnvironmentValue(null));
+        }
+
+        [Fact]
+        public void Enabled_WhenEnvironmentIsTrue_IsTrue()
+        {
+            Assert.True(ReadEnabledWithEnvironmentValue("true"));
+        }
+
         [Fact]
         public void ToFragment_StripsQueryString_MatchesEmittedFragmentShape()
         {
@@ -26,6 +41,20 @@ namespace XboxPrefill.Test
             const string path = "/filestreamingservice/files/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
             Assert.Equal(path, MappingDebugLogger.ToFragment(path));
+        }
+
+        private static bool ReadEnabledWithEnvironmentValue(string? value)
+        {
+            var originalValue = Environment.GetEnvironmentVariable(DebugMappingVariable);
+            try
+            {
+                Environment.SetEnvironmentVariable(DebugMappingVariable, value);
+                return MappingDebugLogger.Enabled;
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(DebugMappingVariable, originalValue);
+            }
         }
     }
 }

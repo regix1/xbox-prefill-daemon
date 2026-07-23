@@ -20,7 +20,7 @@ namespace XboxPrefill.Handlers
         /// Enumerates the account's prefillable titles via titlehub. Only MS-Store/Xbox titles
         /// (those with a non-null pfn AND productId) are returned; non-Store titles are excluded.
         /// </summary>
-        public async Task<List<TitleHubTitle>> GetOwnedTitlesAsync()
+        public async Task<List<TitleHubTitle>> GetOwnedTitlesAsync(CancellationToken cancellationToken = default)
         {
             _ansiConsole.LogMarkupLine("Retrieving owned titles from titlehub");
             var timer = Stopwatch.StartNew();
@@ -38,18 +38,21 @@ namespace XboxPrefill.Handlers
             var url = $"{AppConfig.TitleHubBaseUrl}/users/xuid({xuid})/titles/titlehistory/decoration/detail,image,productId,gamepass,titleHistory";
 
             // Refresh the token FIRST, then read the (now-fresh) authorization header.
-            var httpClient = await _httpClientFactory.GetHttpClientAsync();
+            var httpClient = await _httpClientFactory.GetHttpClientAsync(cancellationToken);
             var freshAccount = _httpClientFactory.AccountManager;
 
             using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(url));
             request.Headers.Add("Authorization", freshAccount.TitleHubAuthorizationHeader);
             request.Headers.Add("x-xbl-contract-version", "2");
             request.Headers.Add("Accept-Language", "en-US");
-            using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             response.EnsureSuccessStatusCode();
 
-            await using var stream = await response.Content.ReadAsStreamAsync();
-            var titleHub = await JsonSerializer.DeserializeAsync(stream, SerializationContext.Default.TitleHubResponse);
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var titleHub = await JsonSerializer.DeserializeAsync(
+                stream,
+                SerializationContext.Default.TitleHubResponse,
+                cancellationToken);
 
             var prefillable = (titleHub?.Titles ?? new List<TitleHubTitle>())
                 .Where(t => !string.IsNullOrEmpty(t.Pfn) && !string.IsNullOrEmpty(t.ProductId))
@@ -66,17 +69,25 @@ namespace XboxPrefill.Handlers
         /// Resolves a Store ProductId to its package ContentId(s) via the anonymous DisplayCatalog endpoint.
         /// A product may expose several SKUs/packages; all ContentIds are collected.
         /// </summary>
-        public async Task<List<string>> GetContentIdsAsync(string productId)
+        public async Task<List<string>> GetContentIdsAsync(
+            string productId,
+            CancellationToken cancellationToken = default)
         {
             var url = $"{AppConfig.DisplayCatalogBaseUrl}/v7.0/products?bigIds={productId}&market=US&languages=en-US,neutral&fieldsTemplate=details";
             using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(url));
 
             // DisplayCatalog is anonymous — use the shared anonymous client, no token refresh required.
-            using var response = await _httpClientFactory.AnonymousClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await _httpClientFactory.AnonymousClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
             response.EnsureSuccessStatusCode();
 
-            await using var stream = await response.Content.ReadAsStreamAsync();
-            var catalog = await JsonSerializer.DeserializeAsync(stream, SerializationContext.Default.DisplayCatalogResponse);
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var catalog = await JsonSerializer.DeserializeAsync(
+                stream,
+                SerializationContext.Default.DisplayCatalogResponse,
+                cancellationToken);
 
             var contentIds = new List<string>();
             foreach (var product in catalog?.Products ?? new List<DisplayCatalogProduct>())
@@ -100,10 +111,12 @@ namespace XboxPrefill.Handlers
         /// Fetches the base package (PackageFiles + version) for a ContentId from the package service.
         /// Requires the device-bearing update token AND a per-request Signature (else the service 403s).
         /// </summary>
-        public async Task<GetBasePackageResponse> GetBasePackageAsync(string contentId)
+        public async Task<GetBasePackageResponse> GetBasePackageAsync(
+            string contentId,
+            CancellationToken cancellationToken = default)
         {
             // Token refresh is authoritative in GetHttpClientAsync — no manual check needed here.
-            var httpClient = await _httpClientFactory.GetHttpClientAsync();
+            var httpClient = await _httpClientFactory.GetHttpClientAsync(cancellationToken);
 
             var account = _httpClientFactory.AccountManager;
             var url = $"{AppConfig.PackageServiceBaseUrl}{contentId}";
@@ -116,11 +129,17 @@ namespace XboxPrefill.Handlers
             request.Headers.Add("Signature", signature);
             request.Headers.Add("x-xbl-contract-version", "1");
 
-            using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
             response.EnsureSuccessStatusCode();
 
-            await using var stream = await response.Content.ReadAsStreamAsync();
-            var package = await JsonSerializer.DeserializeAsync(stream, SerializationContext.Default.GetBasePackageResponse);
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var package = await JsonSerializer.DeserializeAsync(
+                stream,
+                SerializationContext.Default.GetBasePackageResponse,
+                cancellationToken);
             return package ?? new GetBasePackageResponse { PackageFound = false };
         }
     }

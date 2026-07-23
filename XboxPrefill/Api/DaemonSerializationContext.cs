@@ -37,6 +37,7 @@ public class StatusData
 {
     public bool IsLoggedIn { get; init; }
     public bool IsInitialized { get; init; }
+    public bool IsPrefilling { get; init; }
 
     /// <summary>
     /// UTC ISO-8601 expiry of the real login bound (the MSA refresh token, ~90d sliding) when an explicit
