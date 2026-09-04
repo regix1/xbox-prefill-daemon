@@ -47,8 +47,16 @@ namespace XboxPrefill.Settings
 
         #region Timeouts
 
-        //TODO comment
-        public static TimeSpan DefaultRequestTimeout => TimeSpan.FromSeconds(60);
+        /// <summary>
+        /// Bounds a single Xbox Live or Store request. Everything using it carries small JSON: a title list, a
+        /// catalog lookup, a package listing, or a token post, all of which answer in well under a second from a
+        /// healthy service. The value stays low because it applies twice to one call, once to the wait for response
+        /// headers and again to the reply body, and resolving one app makes two such calls before it gives up. That
+        /// puts the ceiling for a single app against a dead service at four times this value, which has to stay
+        /// inside a couple of minutes: a scheduled run walks a whole library, so a slow give-up multiplies by the
+        /// number of games and a ten game run would spend over an hour before reporting anything useful.
+        /// </summary>
+        public static TimeSpan DefaultRequestTimeout => TimeSpan.FromSeconds(20);
 
         #endregion
 

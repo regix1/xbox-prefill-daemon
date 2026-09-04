@@ -4,7 +4,13 @@ namespace XboxPrefill.Handlers
 {
     public sealed class DownloadHandler : IDisposable
     {
-        private const int MaxDownloadRetries = 2;
+        /// <summary>
+        /// Retries after the first attempt, so one retry means two attempts in total. Kept at one because these
+        /// requests all go to the same lancache on the local network: when it is down, a third attempt only
+        /// repeats what the second already established, and the cost is paid per app across a whole scheduled
+        /// run. A retry still covers the case worth covering, a single slice that failed while the cache is up.
+        /// </summary>
+        private const int MaxDownloadRetries = 1;
 
         /// <summary>
         /// Maximum time to wait for lancache to START responding (i.e. return response headers) to a
@@ -24,6 +30,17 @@ namespace XboxPrefill.Handlers
         /// which bounds only the wait for response headers, not the body transfer.
         /// </summary>
         private static readonly TimeSpan BodyIdleTimeout = TimeSpan.FromSeconds(100);
+
+        /// <summary>
+        /// How many requests may fail with nothing at all received before the rest of the queue is abandoned.
+        /// Two full waves of concurrent requests, because one wave is exactly the case that must NOT abandon:
+        /// a queue whose first wave fails and whose next request succeeds is a working download. Any single
+        /// success switches the check off for the remainder of the attempt, so this can only fire against a
+        /// cache that is giving back nothing whatsoever. Without it the walk costs
+        /// <c>ceil(queueLength / MaxConcurrentRequests) x ResponseHeadersTimeout</c>, which for a large game
+        /// runs to hours because the slice queue, not the timeout, is the multiplier.
+        /// </summary>
+        private static readonly int FailuresBeforeSourceIsDown = AppConfig.MaxConcurrentRequests * 2;
 
         private readonly IAnsiConsole _ansiConsole;
         private readonly HttpClient _client;
@@ -50,6 +67,21 @@ namespace XboxPrefill.Handlers
             _client.DefaultRequestHeaders.Add("User-Agent", AppConfig.DefaultUserAgent);
             // Disable HttpClient's overall timeout so it never cuts off a slow-but-progressing large file.
             // Timeouts are scoped per request to the response-headers wait only (see ResponseHeadersTimeout).
+            _client.Timeout = Timeout.InfiniteTimeSpan;
+        }
+
+        /// <summary>
+        /// Builds a handler against a supplied message handler and a known cache address, so the download loop can
+        /// be exercised without a real cache or a DNS lookup. Mirrors the seam on <see cref="HttpClientFactory"/>.
+        /// </summary>
+        internal DownloadHandler(IAnsiConsole ansiConsole, IPrefillProgress progress, HttpMessageHandler handler, string lancacheAddress)
+        {
+            _ansiConsole = ansiConsole;
+            _progress = progress;
+            _lancacheAddress = lancacheAddress;
+
+            _client = new HttpClient(handler);
+            _client.DefaultRequestHeaders.Add("User-Agent", AppConfig.DefaultUserAgent);
             _client.Timeout = Timeout.InfiniteTimeSpan;
         }
 
@@ -134,6 +166,11 @@ namespace XboxPrefill.Handlers
             var progressTask = ctx.AddTask(taskTitle, new ProgressTaskSettings { MaxValue = requestTotalSize });
 
             var failedRequests = new ConcurrentBag<QueuedRequest>();
+            // Counts requests that finished their read loop without throwing. This has to be its own counter:
+            // bytesDownloaded below is incremented for EVERY request including the failed ones, and from the
+            // manifest's slice size rather than the bytes actually read, because it drives the progress bar.
+            var succeededCount = 0;
+            var sourceIsDown = 0;
             long bytesDownloaded = 0;
             var startTime = DateTime.UtcNow;
             long lastProgressReportTicks = 0;
@@ -165,6 +202,14 @@ namespace XboxPrefill.Handlers
 
             await Parallel.ForEachAsync(requestsToDownload, new ParallelOptions { MaxDegreeOfParallelism = AppConfig.MaxConcurrentRequests, CancellationToken = cancellationToken }, async (chunk, ct) =>
             {
+                // The cache has already given back nothing for two full waves, so the rest of the queue is
+                // skipped and the throw below reports it. Returning here also leaves the progress bar alone,
+                // which would otherwise advance for work that was never attempted.
+                if (Volatile.Read(ref sourceIsDown) != 0)
+                {
+                    return;
+                }
+
                 var upstreamHost = string.IsNullOrEmpty(chunk.UpstreamHost) ? upstreamCdn.Host : chunk.UpstreamHost;
 
                 // Bound ONLY the wait for response headers (the time for lancache to start responding).
@@ -229,6 +274,8 @@ namespace XboxPrefill.Handlers
                     {
                         MappingDebugLogger.LogFileCompleted(_progress, requestPath!, fileBytesReceived, debugExpectedBytesByFile![requestPath!], slicesCompleted);
                     }
+
+                    Interlocked.Increment(ref succeededCount);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -258,6 +305,14 @@ namespace XboxPrefill.Handlers
                     failedRequests.Add(chunk);
                     FileLogger.LogExceptionNoStackTrace($"Request {chunk.DownloadUrl}", e);
                 }
+
+                // The success count is read first so a working download pays only one read per request; the bag's
+                // Count walks its per-thread queues, and after the first success it is never reached again.
+                if (Volatile.Read(ref succeededCount) == 0 && failedRequests.Count >= FailuresBeforeSourceIsDown)
+                {
+                    Volatile.Write(ref sourceIsDown, 1);
+                }
+
                 progressTask.Increment(chunk.DownloadSizeBytes);
 
                 // Report progress via IPrefillProgress (throttled)
@@ -284,6 +339,19 @@ namespace XboxPrefill.Handlers
                     }
                 }
             });
+
+            // Thrown here rather than inside the loop body: the body's own catch (Exception) would swallow it, and
+            // concurrent throws would arrive wrapped in an AggregateException with this message buried out of sight.
+            if (Volatile.Read(ref sourceIsDown) != 0)
+            {
+                throw new TimeoutException(
+                    $"Gave up downloading from LANCache at {_lancacheAddress}. The first {FailuresBeforeSourceIsDown} requests " +
+                    $"for '{upstreamCdn.Host}' all failed and not one byte arrived, so the rest of the queue " +
+                    $"({requestsToDownload.Count} files in total) was abandoned rather than waiting on every one of them. " +
+                    $"The usual cause is that the cache-domain group covering '{upstreamCdn.Host}' is not enabled: Xbox game " +
+                    "content needs the 'windowsupdates' and 'xboxlive' groups, so enable them in your LANCache " +
+                    "(uklans/cache-domains) and reload. Otherwise check that the LANCache is running and can reach the internet.");
+            }
 
             // Making sure the progress bar is always set to its max value, in-case some unexpected error leaves the progress bar showing as unfinished
             progressTask.Increment(progressTask.MaxValue);

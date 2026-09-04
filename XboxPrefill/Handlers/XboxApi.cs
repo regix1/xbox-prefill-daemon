@@ -4,6 +4,11 @@ namespace XboxPrefill.Handlers
     /// Talks to the Xbox Live APIs: titlehub (the account's title library), DisplayCatalog
     /// (ProductId -> ContentId, anonymous), and the package service (ContentId -> PackageFiles, signed).
     /// Methods return the API data with minimal transformation. All flows are PROVEN live.
+    ///
+    /// Every call here reads with <see cref="HttpCompletionOption.ResponseHeadersRead"/>, which takes the body
+    /// read outside <see cref="HttpClient.Timeout"/> - that timeout only bounds the wait for response headers.
+    /// A service that returns headers and then stops sending would otherwise stall the daemon forever with no
+    /// error, so each body read is bounded separately and reports which service went quiet.
     /// </summary>
     public sealed class XboxApi
     {
@@ -49,10 +54,20 @@ namespace XboxPrefill.Handlers
             response.EnsureSuccessStatusCode();
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var titleHub = await JsonSerializer.DeserializeAsync(
-                stream,
-                SerializationContext.Default.TitleHubResponse,
-                cancellationToken);
+            TitleHubResponse titleHub;
+            try
+            {
+                titleHub = await JsonSerializer.DeserializeAsync(
+                    stream,
+                    SerializationContext.Default.TitleHubResponse,
+                    cancellationToken).AsTask().WaitAsync(AppConfig.DefaultRequestTimeout, cancellationToken);
+            }
+            catch (TimeoutException)
+            {
+                throw new TimeoutException(
+                    $"Xbox Live sent no reply body for the owned titles request within {AppConfig.DefaultRequestTimeout.TotalSeconds:0} seconds. " +
+                    "Xbox Live is unreachable or not responding right now, so the title list could not be read. Try again in a few minutes.");
+            }
 
             var prefillable = (titleHub?.Titles ?? new List<TitleHubTitle>())
                 .Where(t => !string.IsNullOrEmpty(t.Pfn) && !string.IsNullOrEmpty(t.ProductId))
@@ -84,10 +99,20 @@ namespace XboxPrefill.Handlers
             response.EnsureSuccessStatusCode();
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var catalog = await JsonSerializer.DeserializeAsync(
-                stream,
-                SerializationContext.Default.DisplayCatalogResponse,
-                cancellationToken);
+            DisplayCatalogResponse catalog;
+            try
+            {
+                catalog = await JsonSerializer.DeserializeAsync(
+                    stream,
+                    SerializationContext.Default.DisplayCatalogResponse,
+                    cancellationToken).AsTask().WaitAsync(AppConfig.DefaultRequestTimeout, cancellationToken);
+            }
+            catch (TimeoutException)
+            {
+                throw new TimeoutException(
+                    $"The Microsoft Store catalog sent no reply body for product '{productId}' within {AppConfig.DefaultRequestTimeout.TotalSeconds:0} seconds. " +
+                    "The Store catalog service is unreachable or not responding right now. Try again in a few minutes.");
+            }
 
             var contentIds = new List<string>();
             foreach (var product in catalog?.Products ?? new List<DisplayCatalogProduct>())
@@ -136,10 +161,21 @@ namespace XboxPrefill.Handlers
             response.EnsureSuccessStatusCode();
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var package = await JsonSerializer.DeserializeAsync(
-                stream,
-                SerializationContext.Default.GetBasePackageResponse,
-                cancellationToken);
+            GetBasePackageResponse package;
+            try
+            {
+                package = await JsonSerializer.DeserializeAsync(
+                    stream,
+                    SerializationContext.Default.GetBasePackageResponse,
+                    cancellationToken).AsTask().WaitAsync(AppConfig.DefaultRequestTimeout, cancellationToken);
+            }
+            catch (TimeoutException)
+            {
+                throw new TimeoutException(
+                    $"The Xbox package service sent no reply body for content '{contentId}' within {AppConfig.DefaultRequestTimeout.TotalSeconds:0} seconds. " +
+                    "The package service is unreachable or not responding right now, so this game's files could not be listed. Try again in a few minutes.");
+            }
+
             return package ?? new GetBasePackageResponse { PackageFound = false };
         }
     }
