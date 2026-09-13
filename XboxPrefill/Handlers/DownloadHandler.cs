@@ -1,3 +1,5 @@
+#nullable enable annotations
+
 using System.Threading;
 
 namespace XboxPrefill.Handlers
@@ -45,6 +47,12 @@ namespace XboxPrefill.Handlers
         private readonly IAnsiConsole _ansiConsole;
         private readonly HttpClient _client;
         private readonly IPrefillProgress _progress;
+        private readonly PrefillRun? _run;
+        private readonly RequestBudget? _budget;
+        private readonly string _operationId = Guid.NewGuid().ToString("D");
+        private readonly int _maxRequests = AppConfig.MaxConcurrentRequests;
+        private long _bytesTransferred;
+        public long BytesTransferred => Interlocked.Read(ref _bytesTransferred);
 
         /// <summary>
         /// Set when a content request times out waiting for lancache to start responding. This is the
@@ -58,10 +66,13 @@ namespace XboxPrefill.Handlers
         /// </summary>
         private string _lancacheAddress;
 
-        public DownloadHandler(IAnsiConsole ansiConsole, IPrefillProgress? progress = null)
+        public DownloadHandler(IAnsiConsole ansiConsole, IPrefillProgress? progress = null, RequestBudget? budget = null, int? maxRequests = null)
         {
+            _budget = budget;
+            _maxRequests = maxRequests ?? AppConfig.MaxConcurrentRequests;
             _ansiConsole = ansiConsole;
             _progress = progress ?? NullProgress.Instance;
+            _run = progress as PrefillRun;
 
             _client = new HttpClient();
             _client.DefaultRequestHeaders.Add("User-Agent", AppConfig.DefaultUserAgent);
@@ -78,6 +89,7 @@ namespace XboxPrefill.Handlers
         {
             _ansiConsole = ansiConsole;
             _progress = progress;
+            _run = progress as PrefillRun;
             _lancacheAddress = lancacheAddress;
 
             _client = new HttpClient(handler);
@@ -95,6 +107,8 @@ namespace XboxPrefill.Handlers
         /// <returns>True if all downloads succeeded.  False if downloads failed 3 times.</returns>
         public async Task<bool> DownloadQueuedChunksAsync(List<QueuedRequest> queuedRequests, PackageManifest manifestUrl, string? appId = null, string? appName = null, CancellationToken cancellationToken = default)
         {
+            Interlocked.Exchange(ref _bytesTransferred, 0);
+            _stalledUpstreamHost = null;
             if (AppConfig.SkipDownloads)
             {
                 return true;
@@ -200,7 +214,7 @@ namespace XboxPrefill.Handlers
                 debugProgressByFile = new ConcurrentDictionary<string, FileDebugProgress>(StringComparer.OrdinalIgnoreCase);
             }
 
-            await Parallel.ForEachAsync(requestsToDownload, new ParallelOptions { MaxDegreeOfParallelism = AppConfig.MaxConcurrentRequests, CancellationToken = cancellationToken }, async (chunk, ct) =>
+            await Parallel.ForEachAsync(requestsToDownload, new ParallelOptions { MaxDegreeOfParallelism = _run?.Options.MaxConcurrency ?? _maxRequests, CancellationToken = cancellationToken }, async (chunk, ct) =>
             {
                 // The cache has already given back nothing for two full waves, so the rest of the queue is
                 // skipped and the throw below reports it. Returning here also leaves the progress bar alone,
@@ -211,6 +225,9 @@ namespace XboxPrefill.Handlers
                 }
 
                 var upstreamHost = string.IsNullOrEmpty(chunk.UpstreamHost) ? upstreamCdn.Host : chunk.UpstreamHost;
+
+                using var permit = _run != null ? await _run.AcquireAsync(ct)
+                    : _budget != null ? await _budget.AcquireAsync(_operationId, _maxRequests, ct) : null;
 
                 // Bound ONLY the wait for response headers (the time for lancache to start responding).
                 using var headersTimeoutCts = new CancellationTokenSource(ResponseHeadersTimeout);
@@ -261,6 +278,8 @@ namespace XboxPrefill.Handlers
                     int bytesRead;
                     while ((bytesRead = await responseStream.ReadAsync(buffer, bodyCts.Token)) != 0)
                     {
+                        Interlocked.Add(ref _bytesTransferred, bytesRead);
+                        Interlocked.Add(ref bytesDownloaded, bytesRead);
                         bodyIdleCts.CancelAfter(BodyIdleTimeout); // reset the idle window on each successful read
                         if (debugMapping)
                         {
@@ -316,7 +335,7 @@ namespace XboxPrefill.Handlers
                 progressTask.Increment(chunk.DownloadSizeBytes);
 
                 // Report progress via IPrefillProgress (throttled)
-                var downloaded = Interlocked.Add(ref bytesDownloaded, (long)chunk.DownloadSizeBytes);
+                var downloaded = Interlocked.Read(ref _bytesTransferred);
                 var now = DateTime.UtcNow;
                 var nowTicks = now.Ticks;
                 long prevTicks = Volatile.Read(ref lastProgressReportTicks);
@@ -364,7 +383,7 @@ namespace XboxPrefill.Handlers
                 AppId = progressAppId,
                 AppName = progressAppName,
                 TotalBytes = (long)requestTotalSize,
-                BytesDownloaded = (long)requestTotalSize,
+                BytesDownloaded = Interlocked.Read(ref _bytesTransferred),
                 BytesPerSecond = finalBytesPerSecond,
                 Elapsed = finalElapsed
             });

@@ -1,3 +1,5 @@
+#nullable enable annotations
+
 namespace XboxPrefill.Handlers
 {
     /// <summary>
@@ -12,6 +14,7 @@ namespace XboxPrefill.Handlers
         private readonly IAnsiConsole _ansiConsole;
         private readonly IXboxAuthProvider _authProvider;
         private readonly HttpClient _client;
+        private readonly Action? _save;
 
         private XblRequestSigner _signer;
         private readonly SemaphoreSlim _loginLock = new SemaphoreSlim(1, 1);
@@ -30,6 +33,14 @@ namespace XboxPrefill.Handlers
         }
 
         public string? DisplayName => Account?.DisplayName;
+
+        internal XboxAccountManager(IAnsiConsole ansiConsole, IXboxAuthProvider authProvider, HttpMessageHandler handler, Action save)
+            : this(ansiConsole, authProvider)
+        {
+            _client.Dispose();
+            _client = new HttpClient(handler);
+            _save = save;
+        }
         public string? Xuid => Account?.Xuid;
 
         /// <summary>
@@ -38,7 +49,12 @@ namespace XboxPrefill.Handlers
         /// this clears the copy already held by this manager instance so a mid-login orphan that
         /// finishes late can't keep serving it either.
         /// </summary>
-        public void ClearAccount() => Account = null;
+        public void ClearAccount()
+        {
+            _loginLock.Wait();
+            try { Account = null; }
+            finally { _loginLock.Release(); }
+        }
 
         /// <summary>
         /// True when a long-lived MSA refresh token is present. This token (not the short-lived XSTS
@@ -85,6 +101,28 @@ namespace XboxPrefill.Handlers
 
         public XblRequestSigner Signer => _signer;
 
+        public string Sign(string method, string path, string authorization, byte[] body)
+        {
+            lock (_signer) { return _signer.Sign(method, path, authorization, body); }
+        }
+
+        public async Task AuthorizeAsync(HttpRequestMessage request, bool package, CancellationToken cancellationToken)
+        {
+            await _loginLock.WaitAsync(cancellationToken);
+            try
+            {
+                if (Account == null) throw new XboxLoginException("Xbox re-login required.");
+                var authorization = package ? UpdateAuthorizationHeader : TitleHubAuthorizationHeader;
+                request.Headers.Add("Authorization", authorization);
+                if (package)
+                {
+                    EnsureSigner();
+                    request.Headers.Add("Signature", Sign("GET", request.RequestUri!.PathAndQuery, authorization, Array.Empty<byte>()));
+                }
+            }
+            finally { _loginLock.Release(); }
+        }
+
         public bool TokensAreExpired()
         {
             if (Account == null || string.IsNullOrEmpty(Account.XboxLiveToken) || string.IsNullOrEmpty(Account.UpdateToken))
@@ -108,13 +146,6 @@ namespace XboxPrefill.Handlers
         /// </param>
         public async Task LoginAsync(bool interactive = true, CancellationToken cancellationToken = default)
         {
-            // Fast-path: no lock needed if tokens are still valid.
-            if (!TokensAreExpired())
-            {
-                _ansiConsole.LogMarkupLine("Reusing existing Xbox auth session...");
-                return;
-            }
-
             await _loginLock.WaitAsync(cancellationToken);
             try
             {
@@ -126,7 +157,6 @@ namespace XboxPrefill.Handlers
                 }
 
                 EnsureSigner();
-
                 string accessToken = null;
                 if (Account?.RefreshToken != null)
                 {
@@ -143,7 +173,7 @@ namespace XboxPrefill.Handlers
                 // so the orchestrator surfaces a clear "re-login required" instead of hanging.
                 if (accessToken == null && !interactive)
                 {
-                    throw new InvalidOperationException(
+                    throw new XboxLoginException(
                         "Xbox re-login required: the saved Microsoft refresh token is expired or invalid. Log in again.");
                 }
 
@@ -319,29 +349,26 @@ namespace XboxPrefill.Handlers
                 { "refresh_token", refreshToken }
             };
 
-            try
+            var token = await PostTokenFormAsync(form, cancellationToken);
+            if (token.AccessToken == null)
             {
-                var token = await PostTokenFormAsync(form, cancellationToken);
-                if (token.AccessToken == null)
+                if (token.Error is not ("invalid_grant" or "invalid_token" or "interaction_required"))
                 {
-                    return false;
+                    throw new HttpRequestException("Microsoft token refresh did not return an access token.");
                 }
-
-                if (token.RefreshToken != null)
-                {
-                    Account!.RefreshToken = token.RefreshToken;
-                    // Rolling refresh token rotated — re-stamp so the 90d sliding window restarts from now.
-                    Account.RefreshTokenIssuedUtc = DateTime.UtcNow;
-                }
-
-                // Cache the access token on the instance so MintXstsTokensAsync can read it.
-                _pendingAccessToken = token.AccessToken;
-                return true;
-            }
-            catch (HttpRequestException)
-            {
                 return false;
             }
+
+            if (token.RefreshToken != null)
+            {
+                Account!.RefreshToken = token.RefreshToken;
+                // Rolling refresh token rotated — re-stamp so the 90d sliding window restarts from now.
+                Account.RefreshTokenIssuedUtc = DateTime.UtcNow;
+            }
+
+            // Cache the access token on the instance so MintXstsTokensAsync can read it.
+            _pendingAccessToken = token.AccessToken;
+            return true;
         }
 
         private string _pendingAccessToken;
@@ -424,7 +451,7 @@ namespace XboxPrefill.Handlers
             var bodyBytes = JsonSerializer.SerializeToUtf8Bytes(body, SerializationContext.Default.XblDeviceAuthRequest);
 
             var uri = new Uri(AppConfig.DeviceAuthUrl);
-            var signature = _signer.Sign("POST", uri.PathAndQuery, string.Empty, bodyBytes);
+            var signature = Sign("POST", uri.PathAndQuery, string.Empty, bodyBytes);
 
             using var request = new HttpRequestMessage(HttpMethod.Post, uri);
             request.Headers.Add("x-xbl-contract-version", "1");
@@ -462,7 +489,7 @@ namespace XboxPrefill.Handlers
             request.Headers.Add("x-xbl-contract-version", "1");
             if (signed)
             {
-                request.Headers.Add("Signature", _signer.Sign("POST", uri.PathAndQuery, string.Empty, bodyBytes));
+                request.Headers.Add("Signature", Sign("POST", uri.PathAndQuery, string.Empty, bodyBytes));
             }
             request.Content = new ByteArrayContent(bodyBytes);
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
@@ -528,6 +555,7 @@ namespace XboxPrefill.Handlers
 
         private void Save()
         {
+            if (_save != null) { _save(); return; }
             if (Account == null)
             {
                 return;

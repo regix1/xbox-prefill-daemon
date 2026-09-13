@@ -13,6 +13,8 @@ public sealed class XboxPrefillApi : IDisposable
 {
     private readonly IXboxAuthProvider _authProvider;
     private readonly IPrefillProgress _progress;
+    private readonly RequestBudget? _budget;
+    private readonly int? _maxRequests;
 
     private XboxManager? _xboxManager;
 
@@ -22,13 +24,22 @@ public sealed class XboxPrefillApi : IDisposable
 
     public XboxPrefillApi(
         IXboxAuthProvider authProvider,
-        IPrefillProgress? progress = null)
+        IPrefillProgress? progress = null, RequestBudget? budget = null, int? maxRequests = null)
     {
+        _budget = budget;
+        _maxRequests = maxRequests;
         _authProvider = authProvider ?? throw new ArgumentNullException(nameof(authProvider));
         _progress = progress ?? NullProgress.Instance;
     }
 
     public bool IsInitialized => _isInitialized;
+
+    public Task PrefillAsync(PrefillRun run, CancellationToken cancellationToken)
+    {
+        ThrowIfNotInitialized();
+        ThrowIfDisposed();
+        return _xboxManager!.DownloadMultipleAppsAsync(run, cancellationToken);
+    }
 
     public string? DisplayName => _xboxManager?.DisplayName;
 
@@ -112,7 +123,7 @@ public sealed class XboxPrefillApi : IDisposable
             TransferSpeedUnit = LancachePrefill.Common.Enums.TransferSpeedUnit.Bits
         };
 
-        _xboxManager = new XboxManager(consoleAdapter, downloadArgs, _authProvider, _progress);
+        _xboxManager = new XboxManager(consoleAdapter, downloadArgs, _authProvider, _progress, _budget, _maxRequests);
     }
 
     /// <summary>
@@ -548,92 +559,4 @@ public sealed class XboxPrefillApi : IDisposable
         if (_isDisposed)
             throw new ObjectDisposedException(nameof(XboxPrefillApi));
     }
-}
-
-public class PrefillOptions
-{
-    public bool DownloadAllOwnedGames { get; set; }
-    public bool Force { get; set; }
-
-    /// <summary>Prefill the account's most-recently-played owned/Game Pass titles (Xbox Live title history).</summary>
-    public bool Recent { get; set; }
-
-    /// <summary>Prefill owned/Game Pass titles that also appear on Microsoft's public "most played" ranking.</summary>
-    public bool Top { get; set; }
-
-    /// <summary>
-    /// Explicit Store ProductIds to prefill, in addition to the previously-selected apps. These may be IDs that
-    /// are not present in the titlehub-owned library; they are prefilled directly by ProductId.
-    /// </summary>
-    public List<string> ProductIds { get; set; } = new();
-}
-
-public class PrefillResult
-{
-    public bool Success { get; init; }
-    public string? ErrorMessage { get; init; }
-    public TimeSpan TotalTime { get; init; }
-}
-
-public class ClearCacheResult
-{
-    public bool Success { get; init; }
-    public int FileCount { get; init; }
-    public long BytesCleared { get; init; }
-    public string? Message { get; init; }
-}
-
-public class AppStatus
-{
-    public string AppId { get; init; } = "";
-    public string Name { get; init; } = "";
-    public long DownloadSize { get; init; }
-    public bool IsUpToDate { get; init; }
-}
-
-public class SelectedAppsStatus
-{
-    public List<AppStatus> Apps { get; init; } = new();
-    public long TotalDownloadSize { get; init; }
-    public string? Message { get; init; }
-}
-
-public class OwnedGame
-{
-    public string AppId { get; init; } = string.Empty;
-    public string Name { get; init; } = string.Empty;
-}
-
-public class CacheStatusResult
-{
-    public List<AppCacheStatus> Apps { get; init; } = new();
-    public string? Message { get; init; }
-}
-
-public class AppCacheStatus
-{
-    public string AppId { get; init; } = "";
-    public string Name { get; init; } = "";
-    public bool IsUpToDate { get; init; }
-}
-
-public class CdnInfo
-{
-    public string AppId { get; init; } = string.Empty;
-    public string Name { get; init; } = string.Empty;
-    public string CdnHost { get; init; } = string.Empty;
-    public string ChunkBaseUrl { get; init; } = string.Empty;
-
-    /// <summary>
-    /// Stable per-file path fragments (<c>/filestreamingservice/files/&lt;36-char-GUID&gt;</c>, query string
-    /// stripped) for each downloadable package file. The manager uses these to map cache hits back to this
-    /// product. Empty when the manifest resolved no downloadable files.
-    /// </summary>
-    public List<string> FilePathFragments { get; init; } = new();
-}
-
-public class CdnInfoResult
-{
-    public List<CdnInfo> Apps { get; init; } = new();
-    public string? Message { get; init; }
 }

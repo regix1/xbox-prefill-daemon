@@ -1,3 +1,5 @@
+#nullable enable annotations
+
 namespace XboxPrefill.Handlers
 {
     /// <summary>
@@ -30,11 +32,13 @@ namespace XboxPrefill.Handlers
         /// <summary>
         /// Resolves the app's ProductId to a package manifest containing the full download queue + CDN host.
         /// </summary>
+        public Task<PackageManifest> ResolvePackageAsync(AppInfo app, CancellationToken cancellationToken = default)
+            => ResolvePackageAsync(app, null, cancellationToken);
+
         public async Task<PackageManifest> ResolvePackageAsync(
-            AppInfo app,
-            CancellationToken cancellationToken = default)
+            AppInfo app, PrefillRun? run, CancellationToken cancellationToken)
         {
-            var contentIds = await _xboxApi.GetContentIdsAsync(app.AppId, cancellationToken);
+            var contentIds = await _xboxApi.GetContentIdsAsync(app.AppId, run, cancellationToken);
             if (contentIds.Count == 0)
             {
                 throw new ManifestException($"No package ContentId found for product {app.AppId} ({app.Title}). It may be a bundle edition with no direct package.");
@@ -47,7 +51,7 @@ namespace XboxPrefill.Handlers
             foreach (var contentId in contentIds)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var package = await _xboxApi.GetBasePackageAsync(contentId, cancellationToken);
+                var package = await _xboxApi.GetBasePackageAsync(contentId, run, cancellationToken);
                 if (!package.PackageFound || package.PackageFiles == null)
                 {
                     continue;

@@ -1,3 +1,5 @@
+#nullable enable annotations
+
 namespace XboxPrefill
 {
     public sealed class XboxManager : IDisposable
@@ -6,6 +8,8 @@ namespace XboxPrefill
         private readonly DownloadArguments _downloadArgs;
         private readonly IXboxAuthProvider _authProvider;
         private readonly IPrefillProgress _progress;
+        private readonly PrefillRun? _run;
+        private readonly bool _ownsAccount = true;
 
         private readonly DownloadHandler _downloadHandler;
         private readonly XboxApi _xboxApi;
@@ -15,9 +19,10 @@ namespace XboxPrefill
         private readonly HttpClientFactory _httpClientFactory;
         private readonly XboxTrendingTitlesProvider _trendingTitlesProvider;
 
-        private readonly PrefillSummaryResult _prefillSummaryResult = new PrefillSummaryResult();
+        private PrefillSummaryResult _prefillSummaryResult = new PrefillSummaryResult();
 
-        public XboxManager(IAnsiConsole ansiConsole, DownloadArguments downloadArgs, IXboxAuthProvider authProvider, IPrefillProgress? progress = null)
+        public XboxManager(IAnsiConsole ansiConsole, DownloadArguments downloadArgs, IXboxAuthProvider authProvider, IPrefillProgress? progress = null,
+            RequestBudget? budget = null, int? maxRequests = null)
         {
             _ansiConsole = ansiConsole;
             _downloadArgs = downloadArgs;
@@ -26,7 +31,7 @@ namespace XboxPrefill
             _progress = progress ?? NullProgress.Instance;
 
             // Setup required classes
-            _downloadHandler = new DownloadHandler(_ansiConsole, _progress);
+            _downloadHandler = new DownloadHandler(_ansiConsole, _progress, budget, maxRequests);
             _appInfoHandler = new AppInfoHandler(_ansiConsole);
             _accountManager = XboxAccountManager.LoadFromFile(_ansiConsole, _authProvider);
 
@@ -37,6 +42,30 @@ namespace XboxPrefill
         }
 
         public string? DisplayName => _accountManager.DisplayName;
+
+        private XboxManager(XboxManager session, PrefillRun run)
+        {
+            _run = run;
+            _ownsAccount = false;
+            _authProvider = session._authProvider;
+            _progress = run;
+            _ansiConsole = new ApiConsoleAdapter(_authProvider, run);
+            _downloadArgs = new DownloadArguments { Force = run.Options.Force };
+            _downloadHandler = new DownloadHandler(_ansiConsole, run);
+            _appInfoHandler = session._appInfoHandler;
+            _accountManager = session._accountManager;
+            _httpClientFactory = session._httpClientFactory;
+            _xboxApi = session._xboxApi;
+            _manifestHandler = session._manifestHandler;
+            _trendingTitlesProvider = session._trendingTitlesProvider;
+        }
+
+        public async Task DownloadMultipleAppsAsync(PrefillRun run, CancellationToken cancellationToken)
+        {
+            using var execution = new XboxManager(this, run);
+            await execution.DownloadMultipleAppsAsync(run.Options.Selection == "all", run.Options.Force,
+                run.Options.AppIds?.ToList(), run.Options.Selection == "recent", run.Options.Selection == "top", cancellationToken);
+        }
 
         /// <summary>True when a long-lived MSA refresh token is stored (the real ~90d login bound).</summary>
         public bool HasRefreshToken => _accountManager.HasRefreshToken;
@@ -67,14 +96,15 @@ namespace XboxPrefill
         public async Task DownloadMultipleAppsAsync(
             bool downloadAllOwnedGames,
             bool force = false,
-            List<string> manualIds = null,
+            List<string>? manualIds = null,
             bool recent = false,
             bool top = false,
             CancellationToken cancellationToken = default)
         {
+            _prefillSummaryResult = new PrefillSummaryResult();
             var allOwnedGames = await GetAvailableGamesAsync(cancellationToken);
 
-            var appIdsToDownload = LoadPreviouslySelectedApps();
+            var appIdsToDownload = _run == null ? LoadPreviouslySelectedApps() : new List<string>();
             if (manualIds != null)
             {
                 appIdsToDownload.AddRange(manualIds);
@@ -92,6 +122,10 @@ namespace XboxPrefill
                 appIdsToDownload = await SelectTopTitleAppIdsAsync(allOwnedGames, cancellationToken);
             }
 
+            appIdsToDownload = appIdsToDownload.Select(id => id.Trim().ToUpperInvariant())
+                .Distinct(StringComparer.Ordinal).ToList();
+            if (_run != null && !_run.Progress.Snapshot.SelectionResolved) _run.Progress.ResolveSelection(appIdsToDownload);
+
             // Manual ProductIds may not appear in the titlehub library - prefill them directly.
             var ownedById = allOwnedGames.ToDictionary(e => e.AppId, e => e, StringComparer.OrdinalIgnoreCase);
 
@@ -104,12 +138,19 @@ namespace XboxPrefill
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
+                using var claim = _run?.Claims.TryClaim(_run.OperationId, new[] { appId });
+                if (_run != null && claim == null)
+                {
+                    _progress.OnAppCompleted(new AppDownloadInfo { AppId = appId, Name = appId }, AppDownloadResult.Skipped);
+                    continue;
+                }
+
                 AppInfo? app = null;
                 try
                 {
                     // Resolve from the owned library, or synthesise an AppInfo for a manually-entered ProductId.
                     app = ownedById.TryGetValue(appId, out var owned)
-                        ? owned
+                        ? new AppInfo { AppId = appId, Title = owned.Title, Pfn = owned.Pfn, LastTimePlayed = owned.LastTimePlayed }
                         : new AppInfo { AppId = appId, Title = appId };
 
                     await DownloadSingleAppAsync(app, force, cancellationToken);
@@ -117,6 +158,10 @@ namespace XboxPrefill
                 catch (OperationCanceledException)
                 {
                     // Propagate cancellation - don't treat it as a download error
+                    throw;
+                }
+                catch (XboxLoginException)
+                {
                     throw;
                 }
                 catch (Exception e) when (e is LancacheNotFoundException)
@@ -141,10 +186,15 @@ namespace XboxPrefill
             _ansiConsole.LogMarkupLine("Prefill complete!");
             _prefillSummaryResult.RenderSummaryTable(_ansiConsole);
 
+            if (_prefillSummaryResult.FailedApps > 0)
+            {
+                throw new InvalidOperationException("One or more Xbox downloads failed.");
+            }
+
             // Notify completion via progress interface
             _progress.OnPrefillCompleted(new PrefillSummary
             {
-                TotalApps = _prefillSummaryResult.AlreadyUpToDate + _prefillSummaryResult.Updated + _prefillSummaryResult.FailedApps,
+                TotalApps = appIdsToDownload.Count,
                 UpdatedApps = _prefillSummaryResult.Updated,
                 AlreadyUpToDate = _prefillSummaryResult.AlreadyUpToDate,
                 FailedApps = _prefillSummaryResult.FailedApps,
@@ -177,7 +227,8 @@ namespace XboxPrefill
         /// </summary>
         private async Task<List<string>> SelectTopTitleAppIdsAsync(List<AppInfo> allOwnedGames, CancellationToken cancellationToken)
         {
-            var trendingProductIds = await _trendingTitlesProvider.GetTrendingProductIdsAsync(AppConfig.TopTitlesLimit, cancellationToken);
+            using var permit = _run == null ? null : await _run.AcquireAsync(cancellationToken);
+            var trendingProductIds = await _trendingTitlesProvider.GetTrendingProductIdsAsync(_run?.Options.TopCount ?? AppConfig.TopTitlesLimit, cancellationToken);
             if (trendingProductIds.Count == 0)
             {
                 _progress.OnLog(LogLevel.Warning, "Could not retrieve Microsoft's most-played games list; falling back to all owned games for the \"Top\" prefill.");
@@ -213,7 +264,7 @@ namespace XboxPrefill
             PackageManifest manifest;
             try
             {
-                manifest = await _manifestHandler.ResolvePackageAsync(app, cancellationToken);
+                manifest = await _manifestHandler.ResolvePackageAsync(app, _run, cancellationToken);
                 app.BuildVersion = manifest.Version;
                 _progress.OnLog(LogLevel.Info, $"Resolved package for {app.Title}: version {manifest.Version}, CDN host {manifest.CdnHost}");
             }
@@ -242,7 +293,6 @@ namespace XboxPrefill
             // Logging some metadata about the downloads
             var downloadTimer = Stopwatch.StartNew();
             var totalBytes = ByteSize.FromBytes(chunkDownloadQueue.Sum(e => (long)e.DownloadSizeBytes));
-            _prefillSummaryResult.TotalBytesTransferred += totalBytes;
 
             // Notify that app download is starting
             var appDownloadInfo = new AppDownloadInfo
@@ -257,16 +307,42 @@ namespace XboxPrefill
             _ansiConsole.LogMarkupVerbose($"Downloading {Magenta(totalBytes.ToDecimalString())} from {LightYellow(chunkDownloadQueue.Count)} files");
 
             // Finally run the queued downloads
-            var downloadSuccessful = await _downloadHandler.DownloadQueuedChunksAsync(chunkDownloadQueue, manifest, appId: app.AppId, appName: app.Title, cancellationToken: cancellationToken);
+            bool downloadSuccessful;
+            try
+            {
+                downloadSuccessful = await _downloadHandler.DownloadQueuedChunksAsync(chunkDownloadQueue, manifest, appId: app.AppId, appName: app.Title, cancellationToken: cancellationToken);
+            }
+            finally
+            {
+                _progress.OnDownloadProgress(new DownloadProgressInfo
+                {
+                    AppId = app.AppId,
+                    AppName = app.Title,
+                    TotalBytes = appDownloadInfo.TotalBytes,
+                    BytesDownloaded = _downloadHandler.BytesTransferred
+                });
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            _prefillSummaryResult.TotalBytesTransferred += ByteSize.FromBytes(_downloadHandler.BytesTransferred);
             if (downloadSuccessful)
             {
                 // Logging some metrics about the download
                 _ansiConsole.LogMarkupLine($"Finished in {LightYellow(downloadTimer.FormatElapsedString())} - {Magenta(totalBytes.CalculateBitrate(downloadTimer))}");
                 _ansiConsole.WriteLine();
 
-                _appInfoHandler.MarkDownloadAsSuccessful(app);
+                if (_run != null)
+                {
+                    var committed = AppConfig.SkipDownloads
+                        ? _run.CompleteItem(appDownloadInfo, static () => { }, cancellationToken)
+                        : _appInfoHandler.MarkDownloadAsSuccessful(app, _run, appDownloadInfo, cancellationToken);
+                    if (!committed) return;
+                }
+                else
+                {
+                    if (!AppConfig.SkipDownloads) _appInfoHandler.MarkDownloadAsSuccessful(app);
+                    _progress.OnAppCompleted(appDownloadInfo, AppDownloadResult.Success);
+                }
                 _prefillSummaryResult.Updated++;
-                _progress.OnAppCompleted(appDownloadInfo, AppDownloadResult.Success);
             }
             else
             {
@@ -280,7 +356,7 @@ namespace XboxPrefill
         /// </summary>
         public async Task<List<AppInfo>> GetAvailableGamesAsync(CancellationToken cancellationToken = default)
         {
-            var ownedTitles = await _xboxApi.GetOwnedTitlesAsync(cancellationToken);
+            var ownedTitles = await _xboxApi.GetOwnedTitlesAsync(_run, cancellationToken);
 
             var ownedApps = ownedTitles.Select(title => new AppInfo
             {
@@ -319,7 +395,7 @@ namespace XboxPrefill
         public void Dispose()
         {
             _downloadHandler.Dispose();
-            _httpClientFactory.Dispose();
+            if (_ownsAccount) _httpClientFactory.Dispose();
         }
 
         #region Select Apps

@@ -11,6 +11,7 @@ namespace XboxPrefill.Handlers
     {
         private readonly IAnsiConsole _ansiConsole;
         private readonly XboxAccountManager _accountManager;
+        internal SemaphoreSlim CatalogGate { get; } = new(1, 1);
 
         // Single long-lived client — avoids socket exhaustion during parallel downloads.
         private readonly HttpClient _sharedClient;
@@ -89,6 +90,7 @@ namespace XboxPrefill.Handlers
 
         public void Dispose()
         {
+            CatalogGate.Dispose();
             _sharedClient.Dispose();
             AnonymousClient.Dispose();
         }

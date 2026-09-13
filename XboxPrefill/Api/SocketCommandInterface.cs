@@ -15,11 +15,17 @@ public sealed class SocketCommandInterface : IDisposable
     private readonly SocketAuthProvider _authProvider;
     private readonly SocketProgress _progress;
     private readonly CancellationTokenSource _cts = new();
-    private readonly OwnedOperationCoordinator _prefillOperation = new();
+    private readonly OwnedOperationCoordinator _prefillOperation;
+    private readonly PrefillProtocol _protocol;
+    private readonly Func<PrefillRun, CancellationToken, Task>? _execute;
+    private readonly RequestBudget _budget;
+    private readonly ItemClaims _claims = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PrefillRun> _runs = new();
+    private volatile bool _authLost;
     private CancellationTokenSource? _loginCts;
     private XboxPrefillApi? _api;
     private Task? _loginTask;
-    private bool _isLoggedIn;
+    private volatile bool _isLoggedIn;
     private bool _isLoggingIn;
     private bool _disposed;
 
@@ -42,10 +48,14 @@ public sealed class SocketCommandInterface : IDisposable
         "cancel-login",
         "provide-credential",
         "provide-auto-login"
+        , "get-operation", "cancel-prefill"
     };
 
     public SocketCommandInterface(string socketPath)
     {
+        _protocol = PrefillProtocol.FromEnvironment(AppConfig.MaxConcurrentRequests);
+        _prefillOperation = new OwnedOperationCoordinator(_protocol.MaxConcurrentRuns);
+        _budget = new RequestBudget(_protocol.MaxConcurrentRequests);
         _progress = new SocketProgress();
         _socketServer = new SocketServer(socketPath, _progress);
         _authProvider = new SocketAuthProvider(_socketServer, _progress);
@@ -56,7 +66,17 @@ public sealed class SocketCommandInterface : IDisposable
     }
 
     public SocketCommandInterface(int tcpPort)
+        : this(tcpPort, PrefillProtocol.FromEnvironment(AppConfig.MaxConcurrentRequests), null)
     {
+    }
+
+    internal SocketCommandInterface(int tcpPort, PrefillProtocol protocol, Func<PrefillRun, CancellationToken, Task>? execute)
+    {
+        _protocol = protocol;
+        _execute = execute;
+        _isLoggedIn = execute != null;
+        _prefillOperation = new OwnedOperationCoordinator(_protocol.MaxConcurrentRuns);
+        _budget = new RequestBudget(_protocol.MaxConcurrentRequests);
         _progress = new SocketProgress();
         _socketServer = new SocketServer(tcpPort, _progress);
         _authProvider = new SocketAuthProvider(_socketServer, _progress);
@@ -80,12 +100,12 @@ public sealed class SocketCommandInterface : IDisposable
     public async Task StopAsync()
     {
         await _cts.CancelAsync();
-        await _prefillOperation.CancelAndWaitAsync();
+        await _prefillOperation.CancelAllAndWaitAsync();
         await _socketServer.StopAsync();
         _progress.OnLog(LogLevel.Info, "Socket command interface stopped");
     }
 
-    private async Task<CommandResponse> HandleCommandAsync(CommandRequest request, CancellationToken cancellationToken)
+    internal async Task<CommandResponse> HandleCommandAsync(CommandRequest request, CancellationToken cancellationToken)
     {
         _progress.OnLog(LogLevel.Debug, $"Processing command: {request.Type} (ID: {request.Id})");
 
@@ -112,6 +132,7 @@ public sealed class SocketCommandInterface : IDisposable
                 "provide-credential" => HandleProvideCredential(request),
                 "provide-auto-login" => await HandleProvideAutoLoginAsync(request, cancellationToken),
                 "status" => HandleStatus(request),
+                "get-operation" => HandleGetOperation(request),
                 "get-owned-games" => await HandleGetOwnedGamesAsync(request, cancellationToken),
                 "get-cdn-info" => await HandleGetCdnInfoAsync(request, cancellationToken),
                 "get-selected-apps" => HandleGetSelectedApps(request),
@@ -151,7 +172,7 @@ public sealed class SocketCommandInterface : IDisposable
     private static DaemonCommandLane SelectCommandLane(CommandRequest request)
         => request.Type.ToLowerInvariant() switch
         {
-            "cancel-login" or "cancel-prefill" or "status" or "shutdown"
+            "cancel-login" or "cancel-prefill" or "status" or "get-operation" or "shutdown"
                 => DaemonCommandLane.Control,
             "get-owned-games" or "get-cdn-info" or "get-selected-apps" or
             "get-selected-apps-status" or "get-cache-info" or "check-cache-status"
@@ -166,7 +187,10 @@ public sealed class SocketCommandInterface : IDisposable
             _progress.OnLog(LogLevel.Info, "Already logged in");
             return Task.FromResult(new CommandResponse
             {
-                Id = request.Id, Success = true, Message = "Already logged in", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = true,
+                Message = "Already logged in",
+                CompletedAt = DateTime.UtcNow
             });
         }
 
@@ -175,10 +199,18 @@ public sealed class SocketCommandInterface : IDisposable
             _progress.OnLog(LogLevel.Info, "Login already in progress");
             return Task.FromResult(new CommandResponse
             {
-                Id = request.Id, Success = true, Message = "Login already in progress", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = true,
+                Message = "Login already in progress",
+                CompletedAt = DateTime.UtcNow
             });
         }
 
+        if (_prefillOperation.IsRunning)
+        {
+            return Task.FromResult(new CommandResponse { Id = request.Id, Error = "Active runs are still draining." });
+        }
+        if (_api != null) CleanupApiInstance();
         _progress.OnLog(LogLevel.Info, "Starting secure login process via socket...");
         _isLoggingIn = true;
 
@@ -190,7 +222,7 @@ public sealed class SocketCommandInterface : IDisposable
         // late-completing (superseded) task can tell and must not touch shared login state.
         var loginGeneration = Interlocked.Increment(ref _loginGeneration);
 
-        var api = new XboxPrefillApi(_authProvider, _progress);
+        var api = new XboxPrefillApi(_authProvider, _progress, _budget, _protocol.MaxConcurrentRequests);
         _api = api;
 
         _loginTask = Task.Run(async () =>
@@ -207,6 +239,7 @@ public sealed class SocketCommandInterface : IDisposable
                 }
 
                 _isLoggedIn = true;
+                _authLost = false;
                 _isLoggingIn = false;
                 _progress.OnLog(LogLevel.Info, "Login successful - commands now available");
 
@@ -248,7 +281,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return Task.FromResult(new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Login started - awaiting credentials", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Login started - awaiting credentials",
+            CompletedAt = DateTime.UtcNow
         });
     }
 
@@ -284,7 +320,7 @@ public sealed class SocketCommandInterface : IDisposable
             }
         }
 
-        await _prefillOperation.CancelAndWaitAsync(cancellationToken);
+        await _prefillOperation.CancelAllAndWaitAsync(cancellationToken);
         CleanupApiInstance();
 
         // Wipe the persisted account file AND its storage.key so the refresh token cannot linger
@@ -298,12 +334,17 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Logged out successfully", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Logged out successfully",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
     private async Task<CommandResponse> HandleCancelLoginAsync(CommandRequest request)
     {
+        if (!_isLoggingIn)
+            return new CommandResponse { Id = request.Id, Success = true, Message = "No login in progress" };
         _progress.OnLog(LogLevel.Info, "Cancelling login...");
 
         // Bump the generation first, same as logout: a login task that races past this
@@ -324,7 +365,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Login cancelled", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Login cancelled",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -332,11 +376,28 @@ public sealed class SocketCommandInterface : IDisposable
         CommandRequest request,
         CancellationToken cancellationToken)
     {
+        if (request.Parameters?.TryGetValue("operationId", out var operationId) == true)
+        {
+            var instance = request.Parameters.GetValueOrDefault("daemonInstanceId") ?? string.Empty;
+            _protocol.ValidateInstance(instance);
+            var snapshot = _prefillOperation.Cancel(operationId, instance);
+            return new CommandResponse
+            {
+                Id = request.Id,
+                Success = snapshot != null,
+                Data = snapshot,
+                Error = snapshot == null ? "operation-not-found" : null
+            };
+        }
+
         if (!_prefillOperation.IsRunning)
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = true, Message = "No prefill in progress", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = true,
+                Message = "No prefill in progress",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -345,7 +406,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Prefill cancelled", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Prefill cancelled",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -362,7 +426,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "Missing required credential parameters", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "Missing required credential parameters",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -379,7 +446,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Credential received", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Credential received",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -389,7 +459,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = true, Message = "Already logged in", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = true,
+                Message = "Already logged in",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -420,7 +493,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "Missing required encrypted auto-login parameters", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "Missing required encrypted auto-login parameters",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -438,7 +514,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "Failed to decrypt auto-login payload (expired or invalid challenge)", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "Failed to decrypt auto-login payload (expired or invalid challenge)",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -451,7 +530,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = $"Malformed auto-login payload: {ex.Message}", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = $"Malformed auto-login payload: {ex.Message}",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -459,7 +541,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "Auto-login payload missing refreshToken", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "Auto-login payload missing refreshToken",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -467,10 +552,18 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "A login is already in progress", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "A login is already in progress",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
+        if (_prefillOperation.IsRunning)
+        {
+            return new CommandResponse { Id = request.Id, Error = "Active runs are still draining." };
+        }
+        if (_api != null) CleanupApiInstance();
         _progress.OnLog(LogLevel.Info, "Starting non-interactive auto-login from imported credentials...");
         _isLoggingIn = true;
 
@@ -479,7 +572,7 @@ public sealed class SocketCommandInterface : IDisposable
         var loginCts = _loginCts;
         var loginGeneration = Interlocked.Increment(ref _loginGeneration);
 
-        var api = new XboxPrefillApi(_authProvider, _progress);
+        var api = new XboxPrefillApi(_authProvider, _progress, _budget, _protocol.MaxConcurrentRequests);
         _api = api;
 
         var refreshToken = payload.RefreshToken;
@@ -499,6 +592,7 @@ public sealed class SocketCommandInterface : IDisposable
                 }
 
                 _isLoggedIn = true;
+                _authLost = false;
                 _isLoggingIn = false;
                 _progress.OnLog(LogLevel.Info, "Auto-login successful - commands now available");
 
@@ -540,7 +634,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Auto-login started", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Auto-login started",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -555,6 +652,13 @@ public sealed class SocketCommandInterface : IDisposable
                 IsLoggedIn = _isLoggedIn,
                 IsInitialized = _api?.IsInitialized ?? false,
                 IsPrefilling = _prefillOperation.IsRunning,
+                ProtocolVersion = PrefillProtocol.Version,
+                Features = PrefillProtocol.Features,
+                DaemonInstanceId = _protocol.DaemonInstanceId,
+                MaxConcurrentRuns = _protocol.MaxConcurrentRuns,
+                MaxConcurrentRequests = _protocol.MaxConcurrentRequests,
+                ActiveOperations = _prefillOperation.GetActiveOperations(),
+                RecentOperations = _prefillOperation.GetRecentOperations(),
                 // The real login bound is the MSA refresh token (~90d sliding). It is stamped on every
                 // login/refresh as (issued time + 90d) and surfaced here; the short XSTS expiry is surfaced
                 // separately via XstsExpiryUtc while logged in.
@@ -573,7 +677,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Data = games, CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Data = games,
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -591,7 +698,10 @@ public sealed class SocketCommandInterface : IDisposable
         var result = await _api!.GetCdnInfoAsync(appIds, cancellationToken);
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Data = result, CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Data = result,
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -602,7 +712,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Data = selected, CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Data = selected,
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -615,7 +728,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "appIds parameter required", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "appIds parameter required",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -624,7 +740,10 @@ public sealed class SocketCommandInterface : IDisposable
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "appIds must be a JSON array", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "appIds must be a JSON array",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -634,7 +753,10 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Apps selected", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Apps selected",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -667,11 +789,82 @@ public sealed class SocketCommandInterface : IDisposable
     {
         EnsureLoggedIn();
 
+        if (request.Parameters?.TryGetValue("protocolVersion", out var version) == true && version != "2")
+            return new CommandResponse { Id = request.Id, Error = "Unsupported protocol version." };
+
+        if (request.Parameters?.GetValueOrDefault("protocolVersion") == "2")
+        {
+            var captured = PrefillRun.Capture(request, _protocol);
+            var api = _api!;
+            var run = new PrefillRun(request.Id, _protocol, captured, _budget, _claims, _progress,
+                (snapshot, token) => _socketServer.BroadcastProgressAsync(new ProgressEvent(ToProgress(snapshot)), token));
+            var admission = await _prefillOperation.StartAsync(request.Id, PrefillProtocol.Fingerprint(captured), run.Progress,
+                async token =>
+                {
+                    _runs.TryAdd(run.OperationId, run);
+                    try
+                    {
+                        if (_authLost) throw new XboxLoginException("Xbox re-login required.");
+                        if (_execute != null) await _execute(run, token);
+                        else await api.PrefillAsync(run, token);
+                    }
+                    catch (XboxLoginException)
+                    {
+                        _authLost = true;
+                        _isLoggedIn = false;
+                        foreach (var active in _runs.Values)
+                        {
+                            active.TryChooseTerminal("failed", "auth-lost");
+                            _prefillOperation.Cancel(active.OperationId, _protocol.DaemonInstanceId);
+                        }
+                        throw;
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        run.TryChooseTerminal("cancelled");
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _progress.OnLog(LogLevel.Error, $"Prefill failed: {ex.Message}");
+                        var reason = ex switch
+                        {
+                            LancacheNotFoundException => "lancache-not-found",
+                            TimeoutException => "download-timeout",
+                            IOException => "cache-write-failed",
+                            _ => "download-failed"
+                        };
+                        run.TryChooseTerminal("failed", reason);
+                        throw;
+                    }
+                    finally
+                    {
+                        await run.CompleteAsync();
+                        _runs.TryRemove(run.OperationId, out _);
+                    }
+                }, _cts.Token);
+            return new CommandResponse
+            {
+                Id = request.Id,
+                Success = admission.Accepted || admission.Replayed,
+                Error = admission.Error,
+                Data = admission.Operation == null ? null : new PrefillStart
+                {
+                    RunId = request.Id,
+                    DaemonInstanceId = _protocol.DaemonInstanceId,
+                    State = admission.Replayed ? admission.Operation.State : "started"
+                }
+            };
+        }
+
         if (_prefillOperation.IsRunning)
         {
             return new CommandResponse
             {
-                Id = request.Id, Success = false, Error = "A prefill is already in progress", CompletedAt = DateTime.UtcNow
+                Id = request.Id,
+                Success = false,
+                Error = "A prefill is already in progress",
+                CompletedAt = DateTime.UtcNow
             };
         }
 
@@ -727,17 +920,69 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Prefill started", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Prefill started",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
+    private CommandResponse HandleGetOperation(CommandRequest request)
+    {
+        var parameters = request.Parameters ?? throw new ArgumentException("Missing operation parameters.", nameof(request));
+        _protocol.ValidateInstance(parameters.GetValueOrDefault("daemonInstanceId") ?? string.Empty);
+        var operationId = parameters.GetValueOrDefault("operationId") ?? string.Empty;
+        var offset = parameters.TryGetValue("offset", out var start) ? int.Parse(start, System.Globalization.CultureInfo.InvariantCulture) : 0;
+        var limit = parameters.TryGetValue("limit", out var count) ? int.Parse(count, System.Globalization.CultureInfo.InvariantCulture) : 100;
+        var operation = _prefillOperation.GetOperation(operationId, offset, limit);
+        return new CommandResponse
+        {
+            Id = request.Id,
+            Success = operation != null,
+            Data = operation,
+            Error = operation == null ? "operation-not-found" : null
+        };
+    }
+
+    private static PrefillProgressUpdate ToProgress(RunSnapshot snapshot) => new()
+    {
+        OperationId = snapshot.OperationId,
+        DaemonInstanceId = snapshot.DaemonInstanceId,
+        Sequence = snapshot.Sequence,
+        State = snapshot.State,
+        Reason = snapshot.Reason ?? snapshot.CurrentItem?.Reason,
+        StartedAt = snapshot.StartedAt,
+        UpdatedAt = snapshot.UpdatedAt.UtcDateTime,
+        CurrentAppId = snapshot.CurrentItem?.AppId,
+        CurrentAppName = snapshot.CurrentItem?.Name,
+        TotalBytes = snapshot.CurrentItem?.TotalBytes ?? 0,
+        BytesDownloaded = snapshot.CurrentItem?.BytesTransferred ?? 0,
+        PercentComplete = snapshot.CurrentItem?.TotalBytes > 0
+            ? Math.Min(100, 100.0 * snapshot.CurrentItem.BytesTransferred / snapshot.CurrentItem.TotalBytes.Value) : 0,
+        TotalTime = snapshot.UpdatedAt - snapshot.StartedAt,
+        Result = snapshot.CurrentItem?.Result,
+        TotalApps = snapshot.TotalApps,
+        UpdatedApps = snapshot.CompletedApps,
+        AlreadyUpToDate = snapshot.CachedApps,
+        FailedApps = snapshot.FailedApps,
+        SkippedApps = snapshot.SkippedApps,
+        CancelledApps = snapshot.CancelledApps,
+        TotalBytesTransferred = snapshot.BytesTransferred,
+        CurrentItem = snapshot.CurrentItem
+    };
+
     private CommandResponse HandleClearCache(CommandRequest request)
     {
+        if (_prefillOperation.IsRunning) return new CommandResponse { Id = request.Id, Error = "A prefill is in progress" };
         var result = XboxPrefillApi.ClearCache();
 
         return new CommandResponse
         {
-            Id = request.Id, Success = result.Success, Data = result, Message = result.Message, CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = result.Success,
+            Data = result,
+            Message = result.Message,
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -747,7 +992,11 @@ public sealed class SocketCommandInterface : IDisposable
 
         return new CommandResponse
         {
-            Id = request.Id, Success = info.Success, Data = info, Message = info.Message, CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = info.Success,
+            Data = info,
+            Message = info.Message,
+            CompletedAt = DateTime.UtcNow
         };
     }
 
@@ -791,18 +1040,23 @@ public sealed class SocketCommandInterface : IDisposable
         CommandRequest request,
         CancellationToken cancellationToken)
     {
-        await _prefillOperation.CancelAndWaitAsync(cancellationToken);
+        _isLoggedIn = false;
+        await _cts.CancelAsync();
+        await _prefillOperation.CancelAllAndWaitAsync(cancellationToken);
         CleanupApiInstance();
 
         return new CommandResponse
         {
-            Id = request.Id, Success = true, Message = "Shutdown complete", CompletedAt = DateTime.UtcNow
+            Id = request.Id,
+            Success = true,
+            Message = "Shutdown complete",
+            CompletedAt = DateTime.UtcNow
         };
     }
 
     private void EnsureLoggedIn()
     {
-        if (!_isLoggedIn || _api == null || !_api.IsInitialized)
+        if (_authLost || !_isLoggedIn || (_execute == null && (_api == null || !_api.IsInitialized)))
             throw new InvalidOperationException("Not logged in. Please login first.");
     }
 
@@ -880,6 +1134,7 @@ public sealed class SocketCommandInterface : IDisposable
         _cts.Cancel();
         _loginCts?.Dispose();
         _prefillOperation.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        _budget.Dispose();
         _cts.Dispose();
         _api?.Dispose();
         _authProvider.Dispose();
