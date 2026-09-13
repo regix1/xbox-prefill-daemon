@@ -14,7 +14,7 @@ public sealed class ConcurrentPrefillTests
     {
         var protocol = new PrefillProtocol(3, "3");
         using var http = new BodyHandler();
-        using var commands = new SocketCommandInterface(0, protocol, async (run, token) =>
+        await using var commands = new SocketCommandInterface(0, protocol, async (run, token) =>
         {
             var id = run.Options.AppIds![0];
             using var claim = run.Claims.TryClaim(run.OperationId, new[] { id });

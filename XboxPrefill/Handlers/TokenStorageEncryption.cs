@@ -1,3 +1,5 @@
+#nullable enable annotations
+
 namespace XboxPrefill.Handlers
 {
     /// <summary>
@@ -259,3 +261,5 @@ namespace XboxPrefill.Handlers
         }
     }
 }
+
+#nullable restore annotations

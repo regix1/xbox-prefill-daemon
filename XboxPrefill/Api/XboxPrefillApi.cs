@@ -556,7 +556,6 @@ public sealed class XboxPrefillApi : IDisposable
 
     private void ThrowIfDisposed()
     {
-        if (_isDisposed)
-            throw new ObjectDisposedException(nameof(XboxPrefillApi));
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
     }
 }

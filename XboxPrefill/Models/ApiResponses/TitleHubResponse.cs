@@ -8,7 +8,9 @@ namespace XboxPrefill.Models.ApiResponses
     public sealed class TitleHubResponse
     {
         [JsonPropertyName("titles")]
+#pragma warning disable CA2227 // System.Text.Json replaces Xbox API response collections.
         public List<TitleHubTitle> Titles { get; set; }
+#pragma warning restore CA2227
     }
 
     public sealed class TitleHubTitle

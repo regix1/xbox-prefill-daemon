@@ -417,8 +417,10 @@ public sealed class SocketServer : IAsyncDisposable
 
         if (_acceptTask != null)
         {
+#pragma warning disable VSTHRD003 // The accept loop is started by StartAsync and tracked until shutdown.
             try { await _acceptTask; }
             catch (OperationCanceledException) { }
+#pragma warning restore VSTHRD003
         }
 
         if (!await _dispatcher.StopAsync())

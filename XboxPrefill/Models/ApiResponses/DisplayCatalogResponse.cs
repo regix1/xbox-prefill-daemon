@@ -8,7 +8,9 @@ namespace XboxPrefill.Models.ApiResponses
     public sealed class DisplayCatalogResponse
     {
         [JsonPropertyName("Products")]
+#pragma warning disable CA2227 // System.Text.Json replaces Xbox API response collections.
         public List<DisplayCatalogProduct> Products { get; set; }
+#pragma warning restore CA2227
     }
 
     public sealed class DisplayCatalogProduct
@@ -20,7 +22,9 @@ namespace XboxPrefill.Models.ApiResponses
         public DateTime LastModifiedDate { get; set; }
 
         [JsonPropertyName("DisplaySkuAvailabilities")]
+#pragma warning disable CA2227 // System.Text.Json replaces Xbox API response collections.
         public List<DisplaySkuAvailability> DisplaySkuAvailabilities { get; set; }
+#pragma warning restore CA2227
     }
 
     public sealed class DisplaySkuAvailability
@@ -38,7 +42,9 @@ namespace XboxPrefill.Models.ApiResponses
     public sealed class DisplayCatalogSkuProperties
     {
         [JsonPropertyName("Packages")]
+#pragma warning disable CA2227 // System.Text.Json replaces Xbox API response collections.
         public List<DisplayCatalogPackage> Packages { get; set; }
+#pragma warning restore CA2227
     }
 
     public sealed class DisplayCatalogPackage

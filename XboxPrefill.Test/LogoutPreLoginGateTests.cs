@@ -45,7 +45,7 @@ namespace XboxPrefill.Test
         [Fact]
         public async Task Logout_WhileNotLoggedIn_IsNotRejectedByPreLoginGate()
         {
-            using var socketInterface = new SocketCommandInterface(
+            await using var socketInterface = new SocketCommandInterface(
                 Path.Combine(Path.GetTempPath(), $"xbox-prelogin-gate-{Guid.NewGuid():N}.sock"));
 
             var handleCommandAsync = typeof(SocketCommandInterface).GetMethod(

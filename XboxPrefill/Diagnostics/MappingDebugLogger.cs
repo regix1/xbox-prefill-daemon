@@ -1,3 +1,5 @@
+#nullable enable annotations
+
 namespace XboxPrefill.Diagnostics
 {
     /// <summary>
@@ -92,3 +94,5 @@ namespace XboxPrefill.Diagnostics
             => downloadUrl.Contains('?') ? downloadUrl[..downloadUrl.IndexOf('?')] : downloadUrl;
     }
 }
+
+#nullable restore annotations

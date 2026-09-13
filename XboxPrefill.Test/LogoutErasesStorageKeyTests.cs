@@ -57,7 +57,7 @@ namespace XboxPrefill.Test
             Assert.True(File.Exists(KeyPath), "Precondition: storage.key must exist before logout.");
             Assert.True(File.Exists(AccountPath), "Precondition: account file must exist before logout.");
 
-            using var socketInterface = new SocketCommandInterface(
+            await using var socketInterface = new SocketCommandInterface(
                 Path.Combine(Path.GetTempPath(), $"xbox-logout-storage-key-{Guid.NewGuid():N}.sock"));
 
             var handleCommandAsync = typeof(SocketCommandInterface).GetMethod(

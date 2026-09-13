@@ -9,7 +9,7 @@ public sealed class PrefillRunTests
     public async Task ExclusiveLegacyRegistrationRejectsConcurrentAdmission()
     {
         var protocol = new PrefillProtocol(3, "3");
-        using var commands = new SocketCommandInterface(0, protocol, (_, _) => Task.CompletedTask);
+        await using var commands = new SocketCommandInterface(0, protocol, (_, _) => Task.CompletedTask);
         var owner = (OwnedOperationCoordinator)typeof(SocketCommandInterface).GetField("_prefillOperation", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(commands)!;
         await owner.StartAsync(token => Task.Delay(Timeout.Infinite, token));
         var rejected = await commands.HandleCommandAsync(ConcurrentPrefillTests.Start("A", protocol), CancellationToken.None);
@@ -24,7 +24,7 @@ public sealed class PrefillRunTests
         var entered = new System.Collections.Concurrent.ConcurrentDictionary<string, TaskCompletionSource>();
         foreach (var id in new[] { "A", "B", "C" }) entered[id] = new(TaskCreationOptions.RunContinuationsAsynchronously);
         var fail = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var commands = new SocketCommandInterface(0, protocol, async (run, token) =>
+        await using var commands = new SocketCommandInterface(0, protocol, async (run, token) =>
         {
             entered[run.OperationId].TrySetResult();
             if (run.OperationId == "A")

@@ -19,7 +19,9 @@ namespace XboxPrefill.Models.ApiResponses
         public string Version { get; set; }
 
         [JsonPropertyName("PackageFiles")]
+#pragma warning disable CA2227 // System.Text.Json replaces Xbox API response collections.
         public List<PackageFile> PackageFiles { get; set; }
+#pragma warning restore CA2227
     }
 
     public sealed class PackageFile

@@ -9,7 +9,7 @@ namespace XboxPrefill.Api;
 /// Command interface that uses Unix Domain Socket or TCP for IPC.
 /// Handles all socket commands for the Xbox prefill daemon.
 /// </summary>
-public sealed class SocketCommandInterface : IDisposable
+public sealed class SocketCommandInterface : IAsyncDisposable
 {
     private readonly SocketServer _socketServer;
     private readonly SocketAuthProvider _authProvider;
@@ -1127,18 +1127,18 @@ public sealed class SocketCommandInterface : IDisposable
         await _socketServer.BroadcastAuthStateAsync(statusEvent);
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
 
-        _cts.Cancel();
+        await _cts.CancelAsync();
         _loginCts?.Dispose();
-        _prefillOperation.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        await _prefillOperation.DisposeAsync().AsTask();
         _budget.Dispose();
         _cts.Dispose();
         _api?.Dispose();
         _authProvider.Dispose();
-        _socketServer.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        await _socketServer.DisposeAsync();
         _disposed = true;
 
         GC.SuppressFinalize(this);

@@ -1,5 +1,8 @@
+#nullable enable annotations
+
 using XboxPrefill.Api;
 using XboxPrefill.Settings;
+using Spectre.Console;
 
 namespace XboxPrefill
 {
@@ -11,7 +14,7 @@ namespace XboxPrefill
             {
                 ParseHiddenFlags();
 
-                Console.WriteLine($"XboxPrefill daemon v{ThisAssembly.Info.InformationalVersion}");
+                AnsiConsole.WriteLine($"XboxPrefill daemon v{ThisAssembly.Info.InformationalVersion}");
 
                 var tcpPortEnv = Environment.GetEnvironmentVariable("PREFILL_TCP_PORT");
                 var useTcp = int.TryParse(tcpPortEnv, out var tcpPort) && tcpPort > 0;
@@ -25,8 +28,14 @@ namespace XboxPrefill
                 Console.CancelKeyPress += (_, e) =>
                 {
                     e.Cancel = true;
-                    Console.WriteLine("\nShutdown signal received...");
+                    AnsiConsole.WriteLine("\nShutdown signal received...");
+#pragma warning disable AsyncFixer02 // Console signal callbacks cannot await asynchronous cancellation.
+#pragma warning disable CA1849
+#pragma warning disable VSTHRD103
                     cts.Cancel();
+#pragma warning restore VSTHRD103
+#pragma warning restore CA1849
+#pragma warning restore AsyncFixer02
                 };
 
                 // Optional self-shutdown timer. When PREFILL_MAX_LIFETIME_SECONDS is a positive integer the
@@ -51,10 +60,10 @@ namespace XboxPrefill
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Fatal error: {e.Message}");
+                AnsiConsole.WriteLine($"Fatal error: {e.Message}");
                 if (AppConfig.DebugLogs)
                 {
-                    Console.WriteLine(e.StackTrace);
+                    AnsiConsole.WriteLine(e.StackTrace ?? string.Empty);
                 }
                 return 1;
             }
@@ -73,13 +82,22 @@ namespace XboxPrefill
                 return null;
             }
 
-            Console.WriteLine($"Max lifetime configured: daemon will self-shutdown after {seconds} second(s).");
+            AnsiConsole.WriteLine($"Max lifetime configured: daemon will self-shutdown after {seconds} second(s).");
 
             var dueTime = TimeSpan.FromSeconds(seconds);
             return new System.Threading.Timer(_ =>
             {
-                Console.WriteLine($"\nMax lifetime of {seconds}s reached - initiating clean shutdown...");
-                try { cts.Cancel(); }
+                AnsiConsole.WriteLine($"\nMax lifetime of {seconds}s reached - initiating clean shutdown...");
+                try
+                {
+#pragma warning disable AsyncFixer02 // Timer callbacks cannot await asynchronous cancellation.
+#pragma warning disable CA1849
+#pragma warning disable VSTHRD103
+                    cts.Cancel();
+#pragma warning restore VSTHRD103
+#pragma warning restore CA1849
+#pragma warning restore AsyncFixer02
+                }
                 catch (ObjectDisposedException) { /* already shutting down */ }
             }, null, dueTime, System.Threading.Timeout.InfiniteTimeSpan);
         }
@@ -90,28 +108,30 @@ namespace XboxPrefill
 
             if (args.Any(e => e.Contains("--debug")))
             {
-                Console.WriteLine($"Using --debug flag. Displaying debug only logging...");
-                Console.WriteLine($"Additional debugging files will be output to {AppConfig.DebugOutputDir}");
+                AnsiConsole.WriteLine("Using --debug flag. Displaying debug only logging...");
+                AnsiConsole.WriteLine($"Additional debugging files will be output to {AppConfig.DebugOutputDir}");
                 AppConfig.DebugLogs = true;
             }
 
             if (args.Any(e => e.Contains("--no-download")))
             {
-                Console.WriteLine($"Using --no-download flag. Will skip downloading chunks...");
+                AnsiConsole.WriteLine("Using --no-download flag. Will skip downloading chunks...");
                 AppConfig.SkipDownloads = true;
             }
 
             if (args.Any(e => e.Contains("--nocache")) || args.Any(e => e.Contains("--no-cache")))
             {
-                Console.WriteLine($"Using --nocache flag. Will always re-download manifests...");
+                AnsiConsole.WriteLine("Using --nocache flag. Will always re-download manifests...");
                 AppConfig.NoLocalCache = true;
             }
 
             if (AppConfig.DebugLogs || AppConfig.SkipDownloads || AppConfig.NoLocalCache)
             {
-                Console.WriteLine();
-                Console.WriteLine(new string('─', 60));
+                AnsiConsole.WriteLine();
+                AnsiConsole.WriteLine(new string('─', 60));
             }
         }
     }
 }
+
+#nullable restore annotations

@@ -25,7 +25,9 @@ public class PrefillOptions
     /// Explicit Store ProductIds to prefill, in addition to the previously-selected apps. These may be IDs that
     /// are not present in the titlehub-owned library; they are prefilled directly by ProductId.
     /// </summary>
+#pragma warning disable CA2227 // The socket request serializer replaces this collection from JSON.
     public List<string> ProductIds { get; set; } = new();
+#pragma warning restore CA2227
 }
 
 public class PrefillResult
@@ -221,7 +223,9 @@ public class CommandRequest
 {
     public string Id { get; set; } = string.Empty;
     public string Type { get; set; } = string.Empty;
+#pragma warning disable CA2227 // The socket request serializer replaces this collection from JSON.
     public Dictionary<string, string>? Parameters { get; set; }
+#pragma warning restore CA2227
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 

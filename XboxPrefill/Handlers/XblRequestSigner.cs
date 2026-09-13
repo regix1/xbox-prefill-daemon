@@ -133,7 +133,7 @@ namespace XboxPrefill.Handlers
             return new XblRequestSigner(ecdsa);
         }
 
-        private static void WriteAsciiNullTerminated(Stream stream, string value)
+        private static void WriteAsciiNullTerminated(MemoryStream stream, string value)
         {
             byte[] bytes = Encoding.ASCII.GetBytes(value ?? string.Empty);
             stream.Write(bytes, 0, bytes.Length);

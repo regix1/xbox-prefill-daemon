@@ -17,9 +17,12 @@ namespace XboxPrefill.Models.ApiResponses
         public string Version { get; set; } = string.Empty;
 
         /// <summary>The download queue: one entry per package file, with a lancache-relative path + size.</summary>
+#pragma warning disable CA2227 // Manifest construction replaces the complete download queue.
         public List<QueuedRequest> QueuedRequests { get; set; } = new();
+#pragma warning restore CA2227
 
         /// <summary>The upstream CDN host, exposed for the lancache fill loop (used by the lancache fill loop as the upstream CDN).</summary>
+#pragma warning disable CA1065 // Existing consumers rely on access validating that the manifest is downloadable.
         public Uri ManifestDownloadUri
         {
             get
@@ -31,6 +34,7 @@ namespace XboxPrefill.Models.ApiResponses
                 return new Uri(CdnRootUrl);
             }
         }
+#pragma warning restore CA1065
 
         /// <summary>The upstream CDN url, exposed for the lancache fill loop.</summary>
         public string ManifestDownloadUrl => CdnRootUrl;
@@ -44,6 +48,8 @@ namespace XboxPrefill.Models.ApiResponses
         /// path that the lancache manager uses to map cache hits back to this product.
         /// Populated by <see cref="XboxPrefill.Handlers.ManifestHandler.ResolvePackageAsync"/>.
         /// </summary>
+#pragma warning disable CA2227 // Manifest construction replaces the complete fragment list.
         public List<string> FilePathFragments { get; set; } = new();
+#pragma warning restore CA2227
     }
 }

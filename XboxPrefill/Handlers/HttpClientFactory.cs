@@ -24,26 +24,30 @@ namespace XboxPrefill.Handlers
             _ansiConsole = ansiConsole;
             _accountManager = accountManager;
 
+#pragma warning disable CA2000 // The HttpClient owns and disposes this handler.
             var handler = new SocketsHttpHandler
             {
                 PooledConnectionLifetime = TimeSpan.FromMinutes(5),
                 PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
             };
-            _sharedClient = new HttpClient(handler)
+            _sharedClient = new HttpClient(handler, disposeHandler: true)
             {
                 Timeout = AppConfig.DefaultRequestTimeout
             };
+#pragma warning restore CA2000
             _sharedClient.DefaultRequestHeaders.Add("User-Agent", AppConfig.DefaultUserAgent);
 
+#pragma warning disable CA2000 // The HttpClient owns and disposes this handler.
             var anonHandler = new SocketsHttpHandler
             {
                 PooledConnectionLifetime = TimeSpan.FromMinutes(5),
                 PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
             };
-            AnonymousClient = new HttpClient(anonHandler)
+            AnonymousClient = new HttpClient(anonHandler, disposeHandler: true)
             {
                 Timeout = AppConfig.DefaultRequestTimeout
             };
+#pragma warning restore CA2000
             AnonymousClient.DefaultRequestHeaders.Add("User-Agent", AppConfig.DefaultUserAgent);
         }
 

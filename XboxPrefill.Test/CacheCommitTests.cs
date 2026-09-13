@@ -104,7 +104,7 @@ public sealed class CacheCommitTests
         var failure = new IOException("Injected replacement failure");
         var handler = new AppInfoHandler(path, (_, _) => throw failure);
         var protocol = new PrefillProtocol(1);
-        using var commands = new SocketCommandInterface(0, protocol, (run, token) =>
+        await using var commands = new SocketCommandInterface(0, protocol, (run, token) =>
         {
             run.OnDownloadProgress(new DownloadProgressInfo { AppId = "A", BytesDownloaded = 8, TotalBytes = 8 });
             handler.MarkDownloadAsSuccessful(new AppInfo { AppId = "A", BuildVersion = "1" }, run,
