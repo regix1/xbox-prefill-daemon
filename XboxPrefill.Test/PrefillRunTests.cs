@@ -88,4 +88,28 @@ public sealed class PrefillRunTests
         Assert.Equal(1, run.Progress.Snapshot.SkippedApps);
         Assert.Equal(0, run.Progress.Snapshot.CachedApps);
     }
+
+    [Fact]
+    public async Task CacheRevisionControlsSkipAndSurvivesOperationRecovery()
+    {
+        var protocol = new PrefillProtocol(3);
+        using var budget = new RequestBudget(3);
+        var run = new PrefillRun("run", protocol, new RunOptions
+        {
+            AppIds = ["A"],
+            CachedApps = [new CachedAppInput { AppId = "a", Revision = "revision-1" }],
+            MaxConcurrency = 1
+        }, budget, new ItemClaims(), NullProgress.Instance);
+
+        Assert.True(run.IsCached("A", "revision-1"));
+        Assert.False(run.IsCached("A", "revision-2"));
+        run.OnAppCompleted(new AppDownloadInfo
+        {
+            AppId = "A",
+            CacheRevision = "revision-1"
+        }, AppDownloadResult.Success);
+        await run.CompleteAsync();
+
+        Assert.Equal("revision-1", Assert.Single(run.Progress.GetPage(0, 10).Items).CacheRevision);
+    }
 }

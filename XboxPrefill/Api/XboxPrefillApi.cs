@@ -347,12 +347,12 @@ public sealed class XboxPrefillApi : IDisposable
     /// Checks cache status by comparing app build versions against previously downloaded versions.
     /// Returns which apps are up-to-date and which need updating.
     /// </summary>
-    public async Task<CacheStatusResult> CheckCacheStatusAsync(List<string> appIds, CancellationToken cancellationToken = default)
+    public async Task<CacheStatusResult> CheckCacheStatusAsync(List<CachedAppInput> cachedApps, CancellationToken cancellationToken = default)
     {
         ThrowIfNotInitialized();
         ThrowIfDisposed();
 
-        if (appIds.Count == 0)
+        if (cachedApps.Count == 0)
         {
             return new CacheStatusResult
             {
@@ -364,23 +364,26 @@ public sealed class XboxPrefillApi : IDisposable
         try
         {
             var allGames = await _xboxManager!.GetAvailableGamesAsync(cancellationToken);
-            var gamesByAppId = allGames.ToDictionary(g => g.AppId, g => g);
+            var gamesByAppId = allGames.ToDictionary(g => g.AppId, g => g, StringComparer.OrdinalIgnoreCase);
 
             var apps = new List<AppCacheStatus>();
-            foreach (var appId in appIds.Distinct())
+            foreach (var cachedApp in cachedApps
+                         .Where(app => !string.IsNullOrWhiteSpace(app.Revision))
+                         .DistinctBy(app => app.AppId, StringComparer.OrdinalIgnoreCase))
             {
                 // Manually-entered ProductIds may not be in the owned library; synthesize an AppInfo so the cache
                 // status is still reported (instead of omitting the requested ID).
-                if (!gamesByAppId.TryGetValue(appId, out var game))
+                if (!gamesByAppId.TryGetValue(cachedApp.AppId, out var game))
                 {
-                    game = new AppInfo { AppId = appId, Title = appId };
+                    game = new AppInfo { AppId = cachedApp.AppId, Title = cachedApp.AppId };
                 }
+                var currentRevision = await _xboxManager.GetCurrentRevisionAsync(game, cancellationToken);
 
                 apps.Add(new AppCacheStatus
                 {
-                    AppId = appId,
+                    AppId = cachedApp.AppId,
                     Name = game.Title,
-                    IsUpToDate = _xboxManager.IsAppUpToDate(game)
+                    IsUpToDate = StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision)
                 });
             }
 

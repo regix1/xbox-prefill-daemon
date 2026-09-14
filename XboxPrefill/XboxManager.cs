@@ -279,12 +279,21 @@ namespace XboxPrefill
             }
 
             // Only download the app if it isn't already up to date (now that we know its version).
-            if (force == false && _downloadArgs.Force == false && _appInfoHandler.AppIsUpToDate(app))
+            var isCached = _run != null
+                ? _run.IsCached(app.AppId, manifest.Version)
+                : _appInfoHandler.AppIsUpToDate(app);
+            if (force == false && _downloadArgs.Force == false && isCached)
             {
                 _prefillSummaryResult.AlreadyUpToDate++;
-                var cachedAppInfo = new AppDownloadInfo { AppId = app.AppId, Name = app.Title, TotalBytes = 0 };
-                _progress.OnAppStarted(cachedAppInfo);
-                _progress.OnAppCompleted(cachedAppInfo, AppDownloadResult.AlreadyUpToDate);
+                var cachedApp = new AppDownloadInfo
+                {
+                    AppId = app.AppId,
+                    Name = app.Title,
+                    TotalBytes = 0,
+                    CacheRevision = manifest.Version
+                };
+                _progress.OnAppStarted(cachedApp);
+                _progress.OnAppCompleted(cachedApp, AppDownloadResult.AlreadyUpToDate);
                 return;
             }
 
@@ -300,7 +309,8 @@ namespace XboxPrefill
                 AppId = app.AppId,
                 Name = app.Title,
                 TotalBytes = (long)totalBytes.Bytes,
-                ChunkCount = chunkDownloadQueue.Count
+                ChunkCount = chunkDownloadQueue.Count,
+                CacheRevision = manifest.Version
             };
             _progress.OnAppStarted(appDownloadInfo);
 
@@ -373,6 +383,12 @@ namespace XboxPrefill
         /// Checks if an app's current build version has been previously downloaded.
         /// </summary>
         public bool IsAppUpToDate(AppInfo app) => _appInfoHandler.AppIsUpToDate(app);
+
+        public async Task<string> GetCurrentRevisionAsync(AppInfo app, CancellationToken cancellationToken = default)
+        {
+            var manifest = await _manifestHandler.ResolvePackageAsync(app, null, cancellationToken);
+            return manifest.Version;
+        }
 
         /// <summary>
         /// Resolves the package manifest for an app, which carries the CDN host + download queue.

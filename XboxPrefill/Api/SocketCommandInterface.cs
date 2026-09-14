@@ -956,6 +956,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         CurrentAppId = snapshot.CurrentItem?.AppId,
         CurrentAppName = snapshot.CurrentItem?.Name,
         TotalBytes = snapshot.CurrentItem?.TotalBytes ?? 0,
+        CacheRevision = snapshot.CurrentItem?.CacheRevision,
         BytesDownloaded = snapshot.CurrentItem?.BytesTransferred ?? 0,
         PercentComplete = snapshot.CurrentItem?.TotalBytes > 0
             ? Math.Min(100, 100.0 * snapshot.CurrentItem.BytesTransferred / snapshot.CurrentItem.TotalBytes.Value) : 0,
@@ -1004,12 +1005,12 @@ public sealed class SocketCommandInterface : IAsyncDisposable
     {
         EnsureLoggedIn();
 
-        // Accept app IDs as a JSON string list in "appIds" parameter
-        List<string> appIds;
-        var appIdsJson = request.Parameters?.GetValueOrDefault("appIds");
-        if (!string.IsNullOrEmpty(appIdsJson))
+        List<CachedAppInput> cachedApps;
+        var cachedAppsJson = request.Parameters?.GetValueOrDefault("cachedApps");
+        if (!string.IsNullOrEmpty(cachedAppsJson))
         {
-            appIds = JsonSerializer.Deserialize(appIdsJson, DaemonSerializationContext.Default.ListString) ?? new List<string>();
+            cachedApps = JsonSerializer.Deserialize(cachedAppsJson, DaemonSerializationContext.Default.ListCachedAppInput)
+                ?? throw new ArgumentException("cachedApps must be an array");
         }
         else
         {
@@ -1024,7 +1025,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
             };
         }
 
-        var status = await _api!.CheckCacheStatusAsync(appIds, cancellationToken);
+        var status = await _api!.CheckCacheStatusAsync(cachedApps, cancellationToken);
 
         return new CommandResponse
         {
@@ -1250,6 +1251,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
                 CurrentAppId = app.AppId,
                 CurrentAppName = app.Name,
                 TotalBytes = app.TotalBytes,
+                CacheRevision = app.CacheRevision,
                 BytesDownloaded = bytesDownloaded,
                 Result = result.ToString(),
                 UpdatedAt = DateTime.UtcNow

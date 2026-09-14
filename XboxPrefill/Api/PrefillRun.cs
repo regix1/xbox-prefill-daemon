@@ -16,6 +16,10 @@ public sealed class PrefillRun : IPrefillProgress
     public ItemClaims Claims { get; }
     public string OperationId { get; }
 
+    public bool IsCached(string appId, string revision)
+        => Options.CachedApps.Any(app => string.Equals(app.AppId, appId, StringComparison.OrdinalIgnoreCase)
+            && StringComparer.Ordinal.Equals(app.Revision, revision));
+
     public PrefillRun(string operationId, PrefillProtocol protocol, RunOptions options,
         RequestBudget budget, ItemClaims claims, IPrefillProgress log,
         Func<RunSnapshot, CancellationToken, Task>? publish = null)
@@ -82,6 +86,7 @@ public sealed class PrefillRun : IPrefillProgress
                 State = "completed",
                 Result = "success",
                 TotalBytes = app.TotalBytes,
+                CacheRevision = app.CacheRevision,
                 BytesTransferred = _bytes.GetValueOrDefault(app.AppId)
             }, commit);
         }
@@ -104,6 +109,7 @@ public sealed class PrefillRun : IPrefillProgress
             Result = outcome,
             Reason = outcome == "skipped" ? "skippedOverlap" : null,
             TotalBytes = app.TotalBytes,
+            CacheRevision = app.CacheRevision,
             BytesTransferred = _bytes.GetValueOrDefault(app.AppId)
         });
     }
@@ -131,6 +137,10 @@ public sealed class PrefillRun : IPrefillProgress
                 ?? throw new ArgumentException("appIds must be an array.", nameof(request));
             ids = parsed.Select(id => id.Trim().ToUpperInvariant()).ToArray();
         }
+        var cachedApps = parameters.TryGetValue("cachedApps", out var cachedJson)
+            ? JsonSerializer.Deserialize(cachedJson, DaemonSerializationContext.Default.ListCachedAppInput)
+                ?? throw new ArgumentException("cachedApps must be an array.", nameof(request))
+            : [];
         var maximum = protocol.MaxConcurrentRequests;
         if (parameters.TryGetValue("maxConcurrency", out var concurrency) && !int.TryParse(concurrency, out maximum))
         {
@@ -151,6 +161,7 @@ public sealed class PrefillRun : IPrefillProgress
             Selection = selection,
             MaxConcurrency = maximum,
             TopCount = topCount,
+            CachedApps = cachedApps,
             Force = bool.TryParse(parameters.GetValueOrDefault("force"), out var force) && force
         });
     }
