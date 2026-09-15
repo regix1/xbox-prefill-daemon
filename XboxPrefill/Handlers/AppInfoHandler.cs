@@ -58,11 +58,13 @@ namespace XboxPrefill.Handlers
             }
         }
 
-        public bool AppIsUpToDate(AppInfo appInfo)
+        public bool? AppIsUpToDate(AppInfo appInfo)
         {
             lock (CommitLock)
             {
-                return Read().TryGetValue(appInfo.AppId, out var versions) && versions.Contains(appInfo.BuildVersion);
+                return Read().TryGetValue(appInfo.AppId, out var versions)
+                    ? versions.Contains(appInfo.BuildVersion)
+                    : null;
             }
         }
 

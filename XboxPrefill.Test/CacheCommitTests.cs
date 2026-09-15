@@ -33,7 +33,7 @@ public sealed class CacheCommitTests
                 new AppDownloadInfo { AppId = "A", TotalBytes = 8 }, CancellationToken.None));
             Assert.Equal(0, replacementCalls);
             Assert.False(File.Exists(path));
-            Assert.False(handler.AppIsUpToDate(app));
+            Assert.Null(handler.AppIsUpToDate(app));
             Assert.Equal(0, run.Progress.Snapshot.CompletedApps);
             Assert.Null(run.Progress.GetPage().Items.Single().Result);
             Assert.Empty(directory.GetFiles());
@@ -77,6 +77,11 @@ public sealed class CacheCommitTests
             Assert.True(await cancel.WaitAsync(TimeSpan.FromSeconds(10)));
             await run.CompleteAsync();
             Assert.True(handler.AppIsUpToDate(app));
+            Assert.False(handler.AppIsUpToDate(new AppInfo
+            {
+                AppId = app.AppId,
+                BuildVersion = "other-version"
+            }));
             Assert.Equal("success", run.Progress.GetPage().Items.Single().Result);
             Assert.Equal(1, run.Progress.Snapshot.CompletedApps);
             Assert.Equal(8, run.Progress.Snapshot.BytesTransferred);
@@ -123,7 +128,7 @@ public sealed class CacheCommitTests
             Assert.Equal(0, page.Operation.CompletedApps);
             Assert.NotEqual("success", page.Items.Single().Result);
             Assert.Equal(original, File.ReadAllBytes(path));
-            Assert.False(saved.AppIsUpToDate(new AppInfo { AppId = "A", BuildVersion = "1" }));
+            Assert.Null(saved.AppIsUpToDate(new AppInfo { AppId = "A", BuildVersion = "1" }));
             Assert.Single(directory.GetFiles());
         }
         finally
@@ -162,7 +167,7 @@ public sealed class CacheCommitTests
             var c = new AppInfo { AppId = "C", BuildVersion = "3" };
             Assert.Throws<IOException>(() => failed.MarkDownloadAsSuccessful(c));
             Assert.Equal(bytes, File.ReadAllBytes(path));
-            Assert.False(first.AppIsUpToDate(c));
+            Assert.Null(first.AppIsUpToDate(c));
         }
         finally
         {

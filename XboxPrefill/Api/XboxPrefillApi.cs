@@ -295,7 +295,7 @@ public sealed class XboxPrefillApi : IDisposable
                 var isUpToDate = _xboxManager.IsAppUpToDate(game);
                 long downloadSize = 0;
 
-                if (!isUpToDate)
+                if (isUpToDate != true)
                 {
                     try
                     {
@@ -317,7 +317,7 @@ public sealed class XboxPrefillApi : IDisposable
                     AppId = appId,
                     Name = game.Title,
                     DownloadSize = downloadSize,
-                    IsUpToDate = isUpToDate
+                    IsUpToDate = isUpToDate == true
                 });
             }
 
@@ -368,7 +368,6 @@ public sealed class XboxPrefillApi : IDisposable
 
             var apps = new List<AppCacheStatus>();
             foreach (var cachedApp in cachedApps
-                         .Where(app => !string.IsNullOrWhiteSpace(app.Revision))
                          .DistinctBy(app => app.AppId, StringComparer.OrdinalIgnoreCase))
             {
                 // Manually-entered ProductIds may not be in the owned library; synthesize an AppInfo so the cache
@@ -378,12 +377,23 @@ public sealed class XboxPrefillApi : IDisposable
                     game = new AppInfo { AppId = cachedApp.AppId, Title = cachedApp.AppId };
                 }
                 var currentRevision = await _xboxManager.GetCurrentRevisionAsync(game, cancellationToken);
+                bool? isUpToDate;
+                if (string.IsNullOrWhiteSpace(cachedApp.Revision))
+                {
+                    game.BuildVersion = currentRevision;
+                    isUpToDate = _xboxManager.IsAppUpToDate(game);
+                }
+                else
+                {
+                    isUpToDate = StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision);
+                }
+                if (!isUpToDate.HasValue) continue;
 
                 apps.Add(new AppCacheStatus
                 {
                     AppId = cachedApp.AppId,
                     Name = game.Title,
-                    IsUpToDate = StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision)
+                    IsUpToDate = isUpToDate.Value
                 });
             }
 

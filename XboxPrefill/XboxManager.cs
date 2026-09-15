@@ -282,7 +282,7 @@ namespace XboxPrefill
             var isCached = _run != null
                 ? _run.IsCached(app.AppId, manifest.Version)
                 : _appInfoHandler.AppIsUpToDate(app);
-            if (force == false && _downloadArgs.Force == false && isCached)
+            if (force == false && _downloadArgs.Force == false && isCached == true)
             {
                 _prefillSummaryResult.AlreadyUpToDate++;
                 var cachedApp = new AppDownloadInfo
@@ -382,7 +382,7 @@ namespace XboxPrefill
         /// <summary>
         /// Checks if an app's current build version has been previously downloaded.
         /// </summary>
-        public bool IsAppUpToDate(AppInfo app) => _appInfoHandler.AppIsUpToDate(app);
+        public bool? IsAppUpToDate(AppInfo app) => _appInfoHandler.AppIsUpToDate(app);
 
         public async Task<string> GetCurrentRevisionAsync(AppInfo app, CancellationToken cancellationToken = default)
         {
