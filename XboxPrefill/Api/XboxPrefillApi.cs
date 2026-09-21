@@ -2,6 +2,7 @@
 
 using XboxPrefill.Handlers;
 using XboxPrefill.Models;
+using XboxPrefill.Models.Exceptions;
 using XboxPrefill.Settings;
 
 namespace XboxPrefill.Api;
@@ -15,6 +16,9 @@ public sealed class XboxPrefillApi : IDisposable
     private readonly IPrefillProgress _progress;
     private readonly RequestBudget? _budget;
     private readonly int? _maxRequests;
+    private readonly TimeProvider _clock;
+
+    private static readonly TimeSpan CacheStatusResponseReserve = TimeSpan.FromSeconds(2);
 
     private XboxManager? _xboxManager;
 
@@ -24,10 +28,14 @@ public sealed class XboxPrefillApi : IDisposable
 
     public XboxPrefillApi(
         IXboxAuthProvider authProvider,
-        IPrefillProgress? progress = null, RequestBudget? budget = null, int? maxRequests = null)
+        IPrefillProgress? progress = null,
+        RequestBudget? budget = null,
+        int? maxRequests = null,
+        TimeProvider? clock = null)
     {
         _budget = budget;
         _maxRequests = maxRequests;
+        _clock = clock ?? TimeProvider.System;
         _authProvider = authProvider ?? throw new ArgumentNullException(nameof(authProvider));
         _progress = progress ?? NullProgress.Instance;
     }
@@ -347,75 +355,300 @@ public sealed class XboxPrefillApi : IDisposable
     /// Checks cache status by comparing app build versions against previously downloaded versions.
     /// Returns which apps are up-to-date and which need updating.
     /// </summary>
-    public async Task<CacheStatusResult> CheckCacheStatusAsync(List<CachedAppInput> cachedApps, CancellationToken cancellationToken = default)
+#pragma warning disable CA1068 // New optional wire fields follow the established cancellation-token position to preserve callers.
+    public async Task<CacheStatusResult> CheckCacheStatusAsync(
+        List<CachedAppInput> cachedApps,
+        CancellationToken cancellationToken = default,
+        DateTimeOffset? expiresAtUtc = null,
+        int? version = null)
+#pragma warning restore CA1068
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ThrowIfNotInitialized();
         ThrowIfDisposed();
 
-        if (cachedApps.Count == 0)
+        if (version is not null and not 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(version), "Cache status version must be 2 when supplied.");
+        }
+
+        var v2 = version == 2;
+        var requestedApps = v2
+            ? cachedApps
+            : cachedApps.DistinctBy(app => app.AppId, StringComparer.OrdinalIgnoreCase).ToList();
+
+        if (requestedApps.Count == 0)
         {
             return new CacheStatusResult
             {
                 Apps = new List<AppCacheStatus>(),
-                Message = "No app IDs provided"
+                Message = v2 ? null : "No app IDs provided",
+                Version = v2 ? 2 : null
             };
         }
 
-        try
+        var apps = new List<AppCacheStatus>();
+        DateTimeOffset? inspectionEndsAt = expiresAtUtc - CacheStatusResponseReserve;
+        if (inspectionEndsAt <= _clock.GetUtcNow())
         {
-            var allGames = await _xboxManager!.GetAvailableGamesAsync(cancellationToken);
-            var gamesByAppId = allGames.ToDictionary(g => g.AppId, g => g, StringComparer.OrdinalIgnoreCase);
-
-            var apps = new List<AppCacheStatus>();
-            foreach (var cachedApp in cachedApps
-                         .DistinctBy(app => app.AppId, StringComparer.OrdinalIgnoreCase))
+            if (v2)
             {
-                // Manually-entered ProductIds may not be in the owned library; synthesize an AppInfo so the cache
-                // status is still reported (instead of omitting the requested ID).
-                if (!gamesByAppId.TryGetValue(cachedApp.AppId, out var game))
+                apps.AddRange(requestedApps.Select(app => new AppCacheStatus
                 {
-                    game = new AppInfo { AppId = cachedApp.AppId, Title = cachedApp.AppId };
-                }
-                var currentRevision = await _xboxManager.GetCurrentRevisionAsync(game, cancellationToken);
-                bool? isUpToDate;
-                if (string.IsNullOrWhiteSpace(cachedApp.Revision))
-                {
-                    game.BuildVersion = currentRevision;
-                    isUpToDate = _xboxManager.IsAppUpToDate(game);
-                }
-                else
-                {
-                    isUpToDate = StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision);
-                }
-                if (!isUpToDate.HasValue) continue;
-
-                apps.Add(new AppCacheStatus
-                {
-                    AppId = cachedApp.AppId,
-                    Name = game.Title,
-                    IsUpToDate = isUpToDate.Value
-                });
+                    AppId = app.AppId,
+                    Name = app.AppId,
+                    IsUpToDate = false,
+                    Outcome = CacheOutcome.Unknown,
+                    Reason = CacheReason.DeadlineReached
+                }));
             }
 
             return new CacheStatusResult
             {
                 Apps = apps,
-                Message = $"Checked {apps.Count} apps"
+                Message = v2 ? null : $"Checked {apps.Count} apps",
+                Version = v2 ? 2 : null
             };
+        }
+
+        using var deadlineCancellation = inspectionEndsAt.HasValue
+            ? new CancellationTokenSource(inspectionEndsAt.Value - _clock.GetUtcNow(), _clock)
+            : new CancellationTokenSource();
+        using var inspectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            deadlineCancellation.Token);
+        var inspectionToken = inspectionCancellation.Token;
+
+        List<AppInfo> allGames;
+        try
+        {
+            allGames = await _xboxManager!.GetAvailableGamesAsync(inspectionToken);
+            inspectionToken.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (deadlineCancellation.IsCancellationRequested)
         {
-            _progress.OnError("Failed to check cache status", ex);
+            if (v2)
+            {
+                apps.AddRange(requestedApps.Select(app => new AppCacheStatus
+                {
+                    AppId = app.AppId,
+                    Name = app.AppId,
+                    IsUpToDate = false,
+                    Outcome = CacheOutcome.Unknown,
+                    Reason = CacheReason.DeadlineReached
+                }));
+            }
+
             return new CacheStatusResult
             {
-                Apps = new List<AppCacheStatus>(),
-                Message = $"Error: {ex.Message}"
+                Apps = apps,
+                Message = v2 ? null : $"Checked {apps.Count} apps",
+                Version = v2 ? 2 : null
             };
         }
+        catch (XboxLoginException)
+        {
+            throw;
+        }
+        catch (Exception) when (deadlineCancellation.IsCancellationRequested)
+        {
+            if (v2)
+            {
+                apps.AddRange(requestedApps.Select(app => new AppCacheStatus
+                {
+                    AppId = app.AppId,
+                    Name = app.AppId,
+                    IsUpToDate = false,
+                    Outcome = CacheOutcome.Unknown,
+                    Reason = CacheReason.DeadlineReached
+                }));
+            }
+
+            return new CacheStatusResult
+            {
+                Apps = apps,
+                Message = v2 ? null : $"Checked {apps.Count} apps",
+                Version = v2 ? 2 : null
+            };
+        }
+        catch (Exception ex)
+        {
+            _progress.OnLog(LogLevel.Warning, $"Failed to prepare cache status inspection: {ex.Message}");
+            if (v2)
+            {
+                apps.AddRange(requestedApps.Select(app => new AppCacheStatus
+                {
+                    AppId = app.AppId,
+                    Name = app.AppId,
+                    IsUpToDate = false,
+                    Outcome = CacheOutcome.Unknown,
+                    Reason = CacheReason.InspectionFailed
+                }));
+            }
+
+            return new CacheStatusResult
+            {
+                Apps = apps,
+                Message = v2 ? null : $"Checked {apps.Count} apps",
+                Version = v2 ? 2 : null
+            };
+        }
+
+        var gamesByAppId = allGames.ToDictionary(g => g.AppId, g => g, StringComparer.OrdinalIgnoreCase);
+        var nextAppIndex = 0;
+        for (; nextAppIndex < requestedApps.Count; nextAppIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (deadlineCancellation.IsCancellationRequested)
+            {
+                break;
+            }
+
+            var cachedApp = requestedApps[nextAppIndex];
+            if (!gamesByAppId.TryGetValue(cachedApp.AppId, out var game))
+            {
+                game = new AppInfo { AppId = cachedApp.AppId, Title = cachedApp.AppId };
+            }
+
+            string currentRevision;
+            try
+            {
+                currentRevision = await _xboxManager.GetCurrentRevisionAsync(game, inspectionToken);
+                inspectionToken.ThrowIfCancellationRequested();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException) when (deadlineCancellation.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (XboxLoginException)
+            {
+                throw;
+            }
+            catch (Exception) when (deadlineCancellation.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (ManifestException ex)
+            {
+                _progress.OnLog(LogLevel.Warning, $"Manifest unavailable for {game.Title} ({game.AppId}): {ex.Message}");
+                if (v2)
+                {
+                    apps.Add(new AppCacheStatus
+                    {
+                        AppId = cachedApp.AppId,
+                        Name = game.Title,
+                        IsUpToDate = false,
+                        Outcome = CacheOutcome.Unknown,
+                        Reason = CacheReason.ManifestUnavailable
+                    });
+                }
+
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _progress.OnLog(LogLevel.Warning, $"Cache status inspection failed for {game.Title} ({game.AppId}): {ex.Message}");
+                if (v2)
+                {
+                    apps.Add(new AppCacheStatus
+                    {
+                        AppId = cachedApp.AppId,
+                        Name = game.Title,
+                        IsUpToDate = false,
+                        Outcome = CacheOutcome.Unknown,
+                        Reason = CacheReason.InspectionFailed
+                    });
+                }
+
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(currentRevision))
+            {
+                if (v2)
+                {
+                    apps.Add(new AppCacheStatus
+                    {
+                        AppId = cachedApp.AppId,
+                        Name = game.Title,
+                        IsUpToDate = false,
+                        Outcome = CacheOutcome.Unknown,
+                        Reason = CacheReason.ManifestUnavailable
+                    });
+                }
+
+                continue;
+            }
+
+            bool? isUpToDate;
+            if (string.IsNullOrWhiteSpace(cachedApp.Revision))
+            {
+                game.BuildVersion = currentRevision;
+                isUpToDate = _xboxManager.IsAppUpToDate(game);
+            }
+            else
+            {
+                isUpToDate = StringComparer.Ordinal.Equals(cachedApp.Revision, currentRevision);
+            }
+
+            if (!isUpToDate.HasValue)
+            {
+                if (v2)
+                {
+                    apps.Add(new AppCacheStatus
+                    {
+                        AppId = cachedApp.AppId,
+                        Name = game.Title,
+                        IsUpToDate = false,
+                        Outcome = CacheOutcome.Unknown,
+                        Reason = CacheReason.NoCacheEvidence
+                    });
+                }
+
+                continue;
+            }
+
+            apps.Add(new AppCacheStatus
+            {
+                AppId = cachedApp.AppId,
+                Name = game.Title,
+                IsUpToDate = isUpToDate.Value,
+                Outcome = v2
+                    ? isUpToDate.Value ? CacheOutcome.Current : CacheOutcome.Outdated
+                    : null
+            });
+        }
+
+        if (v2 && nextAppIndex < requestedApps.Count)
+        {
+            for (; nextAppIndex < requestedApps.Count; nextAppIndex++)
+            {
+                var cachedApp = requestedApps[nextAppIndex];
+                apps.Add(new AppCacheStatus
+                {
+                    AppId = cachedApp.AppId,
+                    Name = gamesByAppId.TryGetValue(cachedApp.AppId, out var game) ? game.Title : cachedApp.AppId,
+                    IsUpToDate = false,
+                    Outcome = CacheOutcome.Unknown,
+                    Reason = CacheReason.DeadlineReached
+                });
+            }
+        }
+
+        return new CacheStatusResult
+        {
+            Apps = apps,
+            Message = v2 ? null : $"Checked {apps.Count} apps",
+            Version = v2 ? 2 : null
+        };
     }
 
     public void SetSelectedApps(IEnumerable<string> appIds)

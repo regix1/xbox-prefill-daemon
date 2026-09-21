@@ -64,6 +64,8 @@ namespace XboxPrefill.Handlers
 
                 foreach (var file in package.PackageFiles)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     if (ShouldSkip(file))
                     {
                         continue;
@@ -89,7 +91,11 @@ namespace XboxPrefill.Handlers
                     // $slice_range exactly; a whole-file (or open-ended bytes=0-) request returns a non-slice
                     // response that the slice module aborts at 0 bytes. One QueuedRequest per slice, mirroring
                     // the per-range request model used by the Riot/Battle.net prefill daemons.
-                    queue.AddRange(BuildChunkRequests(upstreamUri.PathAndQuery, upstreamUri.Host, file.FileSize));
+                    queue.AddRange(BuildChunkRequests(
+                        upstreamUri.PathAndQuery,
+                        upstreamUri.Host,
+                        file.FileSize,
+                        cancellationToken));
                     fileCount++;
                 }
             }
@@ -101,7 +107,9 @@ namespace XboxPrefill.Handlers
 
             // Collect the stable per-file path fragments (path only, query string stripped) for the
             // CDN-info API. The lancache manager uses these to map cached requests back to this product.
+            cancellationToken.ThrowIfCancellationRequested();
             manifest.FilePathFragments = CollectFilePathFragments(queue);
+            cancellationToken.ThrowIfCancellationRequested();
 
             manifest.QueuedRequests = queue;
             _ansiConsole.LogMarkupVerbose($"Resolved {LightYellow(fileCount)} package files ({LightYellow(queue.Count)} slices) for {Magenta(app.Title)}");
@@ -116,11 +124,17 @@ namespace XboxPrefill.Handlers
         /// byte count. A zero-byte file yields no slices (there is nothing to warm). Mirrors the per-range request
         /// model used by the Riot/Battle.net daemons so the daemon's <c>Range</c> header matches nginx's slice.
         /// </summary>
-        internal static IEnumerable<QueuedRequest> BuildChunkRequests(string downloadUrl, string upstreamHost, ulong fileSize)
+        internal static IEnumerable<QueuedRequest> BuildChunkRequests(
+            string downloadUrl,
+            string upstreamHost,
+            ulong fileSize,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var total = (long)fileSize;
             for (long start = 0; start < total; start += SliceSizeBytes)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 long end = Math.Min(start + SliceSizeBytes, total) - 1;
                 yield return new QueuedRequest
                 {

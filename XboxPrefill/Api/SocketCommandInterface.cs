@@ -1,5 +1,6 @@
 #nullable enable
 
+using System.Globalization;
 using System.Text.Json;
 using System.Threading;
 
@@ -19,6 +20,7 @@ public sealed class SocketCommandInterface : IAsyncDisposable
     private readonly PrefillProtocol _protocol;
     private readonly Func<PrefillRun, CancellationToken, Task>? _execute;
     private readonly RequestBudget _budget;
+    private readonly TimeProvider _clock;
     private readonly ItemClaims _claims = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PrefillRun> _runs = new();
     private volatile bool _authLost;
@@ -51,8 +53,9 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         , "get-operation", "cancel-prefill"
     };
 
-    public SocketCommandInterface(string socketPath)
+    public SocketCommandInterface(string socketPath, TimeProvider? clock = null)
     {
+        _clock = clock ?? TimeProvider.System;
         _protocol = PrefillProtocol.FromEnvironment(AppConfig.MaxConcurrentRequests);
         _prefillOperation = new OwnedOperationCoordinator(_protocol.MaxConcurrentRuns);
         _budget = new RequestBudget(_protocol.MaxConcurrentRequests);
@@ -65,13 +68,18 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         _progress.SocketServer = _socketServer;
     }
 
-    public SocketCommandInterface(int tcpPort)
-        : this(tcpPort, PrefillProtocol.FromEnvironment(AppConfig.MaxConcurrentRequests), null)
+    public SocketCommandInterface(int tcpPort, TimeProvider? clock = null)
+        : this(tcpPort, PrefillProtocol.FromEnvironment(AppConfig.MaxConcurrentRequests), null, clock)
     {
     }
 
-    internal SocketCommandInterface(int tcpPort, PrefillProtocol protocol, Func<PrefillRun, CancellationToken, Task>? execute)
+    internal SocketCommandInterface(
+        int tcpPort,
+        PrefillProtocol protocol,
+        Func<PrefillRun, CancellationToken, Task>? execute,
+        TimeProvider? clock = null)
     {
+        _clock = clock ?? TimeProvider.System;
         _protocol = protocol;
         _execute = execute;
         _isLoggedIn = execute != null;
@@ -222,7 +230,12 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         // late-completing (superseded) task can tell and must not touch shared login state.
         var loginGeneration = Interlocked.Increment(ref _loginGeneration);
 
-        var api = new XboxPrefillApi(_authProvider, _progress, _budget, _protocol.MaxConcurrentRequests);
+        var api = new XboxPrefillApi(
+            _authProvider,
+            _progress,
+            _budget,
+            _protocol.MaxConcurrentRequests,
+            _clock);
         _api = api;
 
         _loginTask = Task.Run(async () =>
@@ -572,7 +585,12 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         var loginCts = _loginCts;
         var loginGeneration = Interlocked.Increment(ref _loginGeneration);
 
-        var api = new XboxPrefillApi(_authProvider, _progress, _budget, _protocol.MaxConcurrentRequests);
+        var api = new XboxPrefillApi(
+            _authProvider,
+            _progress,
+            _budget,
+            _protocol.MaxConcurrentRequests,
+            _clock);
         _api = api;
 
         var refreshToken = payload.RefreshToken;
@@ -653,7 +671,10 @@ public sealed class SocketCommandInterface : IAsyncDisposable
                 IsInitialized = _api?.IsInitialized ?? false,
                 IsPrefilling = _prefillOperation.IsRunning,
                 ProtocolVersion = PrefillProtocol.Version,
-                Features = PrefillProtocol.Features,
+                Features = PrefillProtocol.Features
+                    .Append("cacheStatusV2")
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
                 DaemonInstanceId = _protocol.DaemonInstanceId,
                 MaxConcurrentRuns = _protocol.MaxConcurrentRuns,
                 MaxConcurrentRequests = _protocol.MaxConcurrentRequests,
@@ -1005,6 +1026,42 @@ public sealed class SocketCommandInterface : IAsyncDisposable
     {
         EnsureLoggedIn();
 
+        int? version = null;
+        var versionText = request.Parameters?.GetValueOrDefault("cacheStatusVersion");
+        if (versionText != null)
+        {
+            if (!int.TryParse(versionText, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedVersion)
+                || parsedVersion != 2)
+            {
+                throw new ArgumentException("cacheStatusVersion must be 2 when supplied");
+            }
+
+            version = parsedVersion;
+        }
+
+        DateTimeOffset? expiresAtUtc = null;
+        var expiryText = request.Parameters?.GetValueOrDefault("expiresAtUtc");
+        if (version == 2 && string.IsNullOrWhiteSpace(expiryText))
+        {
+            throw new ArgumentException("expiresAtUtc is required for cache status version 2");
+        }
+
+        if (expiryText != null)
+        {
+            if (!DateTimeOffset.TryParseExact(
+                    expiryText,
+                    "O",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var parsedExpiry)
+                || parsedExpiry.Offset != TimeSpan.Zero)
+            {
+                throw new ArgumentException("expiresAtUtc must be a round-trip UTC timestamp");
+            }
+
+            expiresAtUtc = parsedExpiry;
+        }
+
         List<CachedAppInput> cachedApps;
         var cachedAppsJson = request.Parameters?.GetValueOrDefault("cachedApps");
         if (!string.IsNullOrEmpty(cachedAppsJson))
@@ -1014,6 +1071,11 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         }
         else
         {
+            if (version == 2)
+            {
+                throw new ArgumentException("cachedApps must be an array for cache status version 2");
+            }
+
             // No app IDs provided
             return new CommandResponse
             {
@@ -1025,7 +1087,28 @@ public sealed class SocketCommandInterface : IAsyncDisposable
             };
         }
 
-        var status = await _api!.CheckCacheStatusAsync(cachedApps, cancellationToken);
+        if (version == 2)
+        {
+            var appIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var cachedApp in cachedApps)
+            {
+                if (string.IsNullOrWhiteSpace(cachedApp.AppId))
+                {
+                    throw new ArgumentException("cachedApps must contain nonempty appId values");
+                }
+
+                if (!appIds.Add(cachedApp.AppId))
+                {
+                    throw new ArgumentException("cachedApps must contain case-insensitively unique appId values");
+                }
+            }
+        }
+
+        var status = await _api!.CheckCacheStatusAsync(
+            cachedApps,
+            cancellationToken,
+            expiresAtUtc,
+            version);
 
         return new CommandResponse
         {
