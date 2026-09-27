@@ -153,9 +153,19 @@ namespace XboxPrefill.Handlers
                 if (!TokensAreExpired())
                 {
                     _ansiConsole.LogMarkupLine("Reusing existing Xbox auth session...");
+                    if (Account != null && string.IsNullOrWhiteSpace(Account.DisplayName))
+                    {
+                        var gamertag = await TryGetGamertagAsync(cancellationToken);
+                        if (!string.IsNullOrWhiteSpace(gamertag))
+                        {
+                            Account.DisplayName = gamertag;
+                            Save();
+                        }
+                    }
                     return;
                 }
 
+                var previousXuid = Account?.Xuid;
                 EnsureSigner();
                 string accessToken = null;
                 if (Account?.RefreshToken != null)
@@ -180,6 +190,7 @@ namespace XboxPrefill.Handlers
                 accessToken ??= await DeviceCodeLoginAsync(cancellationToken);
 
                 await MintXstsTokensAsync(accessToken, cancellationToken);
+                await SetGamertagAsync(previousXuid, cancellationToken);
                 Save();
             }
             finally
@@ -204,6 +215,7 @@ namespace XboxPrefill.Handlers
             await _loginLock.WaitAsync(cancellationToken);
             try
             {
+                var previousXuid = Account?.Xuid;
                 Account ??= new XboxAccount();
                 Account.RefreshToken = refreshToken;
                 // The imported token's true issue time is unknown to us, so stamp now. This is conservative:
@@ -232,6 +244,7 @@ namespace XboxPrefill.Handlers
                 _pendingAccessToken = null;
 
                 await MintXstsTokensAsync(accessToken, cancellationToken);
+                await SetGamertagAsync(previousXuid, cancellationToken);
                 Save();
             }
             finally
@@ -410,7 +423,71 @@ namespace XboxPrefill.Handlers
             Account.UpdateToken = updateXsts.Token;
             Account.UpdateUhs = updateClaims?.Uhs;
             Account.UpdateExpiresAt = updateXsts.NotAfter;
-            Account.Xuid = titleClaims?.Xid ?? Account.Xuid;
+            Account.Xuid = titleClaims?.Xid;
+        }
+
+        private async Task SetGamertagAsync(string? previousXuid, CancellationToken cancellationToken)
+        {
+            if (!string.Equals(previousXuid, Account?.Xuid, StringComparison.Ordinal))
+            {
+                Account!.DisplayName = null;
+            }
+
+            var gamertag = await TryGetGamertagAsync(cancellationToken);
+            if (!string.IsNullOrWhiteSpace(gamertag))
+            {
+                Account!.DisplayName = gamertag;
+            }
+        }
+
+        private async Task<string?> TryGetGamertagAsync(CancellationToken cancellationToken)
+        {
+            var xuid = Account?.Xuid;
+            if (string.IsNullOrWhiteSpace(xuid)
+                || string.IsNullOrWhiteSpace(Account?.XboxLiveToken)
+                || string.IsNullOrWhiteSpace(Account?.XboxLiveUhs))
+            {
+                return null;
+            }
+
+            try
+            {
+                var uri = new Uri($"https://profile.xboxlive.com/users/xuid({Uri.EscapeDataString(xuid)})/profile/settings?settings=Gamertag");
+                using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+                request.Headers.TryAddWithoutValidation("Authorization", TitleHubAuthorizationHeader);
+                request.Headers.Add("x-xbl-contract-version", "2");
+                request.Headers.AcceptLanguage.ParseAdd("en-US");
+
+                using var response = await _client.SendAsync(request, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _ansiConsole.LogMarkupLine(
+                        $"Xbox profile lookup returned HTTP {(int)response.StatusCode}; continuing without a display name.");
+                    return null;
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                var profile = await JsonSerializer.DeserializeAsync(
+                    stream,
+                    SerializationContext.Default.XboxProfileResponse,
+                    cancellationToken);
+                var gamertag = profile?.Users?
+                    .SelectMany(user => user.Settings ?? Enumerable.Empty<XboxProfileSetting>())
+                    .FirstOrDefault(setting => string.Equals(setting.Id, "Gamertag", StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(setting.Value))
+                    ?.Value;
+                return string.IsNullOrWhiteSpace(gamertag) ? null : gamertag.Trim();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _ansiConsole.LogMarkupLine(
+                    $"Xbox profile lookup failed ({ex.GetType().Name}); continuing without a display name.");
+                return null;
+            }
         }
 
         private async Task<string> AuthenticateUserAsync(string accessToken, CancellationToken cancellationToken)

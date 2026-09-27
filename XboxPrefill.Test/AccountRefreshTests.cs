@@ -22,8 +22,10 @@ public sealed class AccountRefreshTests
         http.Release.TrySetResult();
         await Task.WhenAll(calls).WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(1, http.Refreshes);
+        Assert.Equal(1, http.ProfileRequests);
         Assert.Equal(1, saves);
         Assert.False(account.TokensAreExpired());
+        Assert.Equal("RefreshPlayer", account.DisplayName);
         Assert.Equal(signer.ExportPkcs8Base64(), account.Account.DeviceKeyPkcs8);
         var requests = Enumerable.Range(0, 16).Select(_ => new HttpRequestMessage(HttpMethod.Get, "https://packages.test/item")).ToArray();
         try
@@ -49,6 +51,7 @@ public sealed class AccountRefreshTests
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int Refreshes;
+        public int ProfileRequests;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             string json;
@@ -58,6 +61,11 @@ public sealed class AccountRefreshTests
                 Entered.TrySetResult();
                 await Release.Task.WaitAsync(cancellationToken);
                 json = "{\"access_token\":\"test-access\",\"refresh_token\":\"test-refresh\"}";
+            }
+            else if (request.RequestUri.Host == "profile.xboxlive.com")
+            {
+                Interlocked.Increment(ref ProfileRequests);
+                json = "{\"profileUsers\":[{\"settings\":[{\"id\":\"Gamertag\",\"value\":\"RefreshPlayer\"}]}]}";
             }
             else
             {

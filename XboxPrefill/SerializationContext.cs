@@ -14,6 +14,7 @@ namespace XboxPrefill
     [JsonSerializable(typeof(XstsAuthRequest))]
     [JsonSerializable(typeof(XblAuthResponse))]
     [JsonSerializable(typeof(XstsTokenResponse))]
+    [JsonSerializable(typeof(XboxProfileResponse))]
     // Catalog + package resolution
     [JsonSerializable(typeof(TitleHubResponse))]
     [JsonSerializable(typeof(DisplayCatalogResponse))]
