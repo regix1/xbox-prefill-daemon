@@ -185,8 +185,9 @@ public sealed class XboxPrefillApi : IDisposable
         {
             var allGames = await _xboxManager!.GetAvailableGamesAsync(cancellationToken);
 
-            // Filter to requested appIds if provided. Manually-entered ProductIds may not be in the owned library;
-            // synthesize an AppInfo for those so they are still resolved rather than silently dropped.
+            // Filter to requested appIds if provided. An appIds entry can be missing from the owned library, for
+            // example a saved selection whose title has left it; synthesize an AppInfo for those so they are still
+            // resolved rather than silently dropped.
             if (appIds != null && appIds.Count > 0)
             {
                 var ownedById = allGames.ToDictionary(g => g.AppId, g => g, StringComparer.OrdinalIgnoreCase);
@@ -293,8 +294,9 @@ public sealed class XboxPrefillApi : IDisposable
 
             foreach (var appId in selectedAppIds)
             {
-                // Manually-entered ProductIds may not be in the owned library; synthesize an AppInfo so they are
-                // still resolved (size + up-to-date check) instead of reported as size 0.
+                // An appIds entry can be missing from the owned library, for example a saved selection whose title
+                // has left it; synthesize an AppInfo so it is still resolved (size + up-to-date check) instead of
+                // reported as size 0.
                 if (!gamesByAppId.TryGetValue(appId, out var game))
                 {
                     game = new AppInfo { AppId = appId, Title = appId };
@@ -667,52 +669,6 @@ public sealed class XboxPrefillApi : IDisposable
 
         _xboxManager!.SetAppsAsSelected(tuiApps);
         _progress.OnLog(LogLevel.Info, $"Set {tuiApps.Count} apps for prefill (cached in memory)");
-    }
-
-    /// <summary>
-    /// Runs the prefill operation
-    /// </summary>
-    public async Task<PrefillResult> PrefillAsync(
-        PrefillOptions? options = null,
-        CancellationToken cancellationToken = default)
-    {
-        ThrowIfNotInitialized();
-        ThrowIfDisposed();
-
-        options ??= new PrefillOptions();
-
-        _progress.OnOperationStarted("Prefill operation");
-        var timer = System.Diagnostics.Stopwatch.StartNew();
-
-        try
-        {
-            await _xboxManager!.DownloadMultipleAppsAsync(
-                downloadAllOwnedGames: options.DownloadAllOwnedGames,
-                force: options.Force,
-                manualIds: options.ProductIds is { Count: > 0 } ? options.ProductIds : null,
-                recent: options.Recent,
-                top: options.Top,
-                cancellationToken: cancellationToken);
-
-            cancellationToken.ThrowIfCancellationRequested();
-            _progress.OnOperationCompleted("Prefill operation", timer.Elapsed);
-
-            return new PrefillResult
-            {
-                Success = true,
-                TotalTime = timer.Elapsed
-            };
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            _progress.OnLog(LogLevel.Info, "Prefill operation cancelled");
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _progress.OnError("Prefill operation failed", ex);
-            throw;
-        }
     }
 
     private static (int FileCount, long TotalBytes)? GetCacheStats()

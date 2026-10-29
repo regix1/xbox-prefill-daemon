@@ -10,33 +10,6 @@ public sealed class PrefillStart
     public string State { get; init; } = "started";
 }
 
-public class PrefillOptions
-{
-    public bool DownloadAllOwnedGames { get; set; }
-    public bool Force { get; set; }
-
-    /// <summary>Prefill the account's most-recently-played owned/Game Pass titles (Xbox Live title history).</summary>
-    public bool Recent { get; set; }
-
-    /// <summary>Prefill owned/Game Pass titles that also appear on Microsoft's public "most played" ranking.</summary>
-    public bool Top { get; set; }
-
-    /// <summary>
-    /// Explicit Store ProductIds to prefill, in addition to the previously-selected apps. These may be IDs that
-    /// are not present in the titlehub-owned library; they are prefilled directly by ProductId.
-    /// </summary>
-#pragma warning disable CA2227 // The socket request serializer replaces this collection from JSON.
-    public List<string> ProductIds { get; set; } = new();
-#pragma warning restore CA2227
-}
-
-public class PrefillResult
-{
-    public bool Success { get; init; }
-    public string? ErrorMessage { get; init; }
-    public TimeSpan TotalTime { get; init; }
-}
-
 public class ClearCacheResult
 {
     public bool Success { get; init; }
@@ -223,6 +196,7 @@ public class CommandResponse
     public bool Success { get; set; }
     public string? Message { get; set; }
     public string? Error { get; set; }
+    public string? ErrorCode { get; set; }
     public object? Data { get; set; }
     public bool RequiresLogin { get; set; }
     public DateTime CompletedAt { get; set; } = DateTime.UtcNow;

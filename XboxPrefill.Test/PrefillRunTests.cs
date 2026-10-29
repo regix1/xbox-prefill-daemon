@@ -18,6 +18,24 @@ public sealed class PrefillRunTests
     }
 
     [Fact]
+    public async Task UnknownOperationAnswersWithTheTypedNotFoundCode()
+    {
+        var protocol = new PrefillProtocol(3, "3");
+        await using var commands = new SocketCommandInterface(0, protocol, (_, _) => Task.CompletedTask);
+        foreach (var type in new[] { "cancel-prefill", "get-operation" })
+        {
+            var response = await commands.HandleCommandAsync(new CommandRequest
+            {
+                Id = type,
+                Type = type,
+                Parameters = new() { ["operationId"] = "missing", ["daemonInstanceId"] = protocol.DaemonInstanceId }
+            }, CancellationToken.None);
+            Assert.False(response.Success);
+            Assert.Equal("operation-not-found", response.ErrorCode);
+        }
+    }
+
+    [Fact]
     public async Task AuthenticationLossFailsEveryActiveRunAndBlocksAdmission()
     {
         var protocol = new PrefillProtocol(3, "3");

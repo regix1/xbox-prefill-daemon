@@ -158,48 +158,6 @@ public sealed class DaemonAdapterTests
         }
     }
 
-    [Fact]
-    public async Task SocketProgress_CancellationBroadcastsCancelledTerminal()
-    {
-        var originalSecret = Environment.GetEnvironmentVariable(SocketSecretVariable);
-        Environment.SetEnvironmentVariable(SocketSecretVariable, null);
-        var progress = new SocketCommandInterface.SocketProgress();
-        var port = GetUnusedTcpPort();
-        await using var server = new SocketServer(port, progress, IPAddress.Loopback)
-        {
-            CommandLaneSelector = _ => DaemonCommandLane.Concurrent,
-            OnCommand = (request, _) => Task.FromResult(new CommandResponse
-            {
-                Id = request.Id,
-                Success = true
-            })
-        };
-        progress.SocketServer = server;
-
-        try
-        {
-            await server.StartAsync();
-            using var client = new TcpClient();
-            await client.ConnectAsync(IPAddress.Loopback, port);
-            var stream = client.GetStream();
-
-            await WriteCommandAsync(stream, new CommandRequest { Id = "ready-id", Type = "status" });
-            _ = await ReadResponseAsync(stream).WaitAsync(TimeSpan.FromSeconds(5));
-
-            progress.OnCancelled("Prefill cancelled by user");
-            using var progressEvent = await ReadJsonFrameAsync(stream).WaitAsync(TimeSpan.FromSeconds(5));
-            var root = progressEvent.RootElement;
-
-            Assert.Equal("progress", root.GetProperty("type").GetString());
-            Assert.Equal("cancelled", root.GetProperty("data").GetProperty("state").GetString());
-            Assert.Equal("Prefill cancelled by user", root.GetProperty("data").GetProperty("errorMessage").GetString());
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(SocketSecretVariable, originalSecret);
-        }
-    }
-
     private static int GetUnusedTcpPort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);

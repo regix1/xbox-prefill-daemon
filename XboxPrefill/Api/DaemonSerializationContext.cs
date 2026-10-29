@@ -13,7 +13,6 @@ namespace XboxPrefill.Api;
 [JsonSerializable(typeof(List<OwnedGame>))]
 [JsonSerializable(typeof(List<string>))]
 [JsonSerializable(typeof(List<CachedAppInput>))]
-[JsonSerializable(typeof(PrefillResult))]
 [JsonSerializable(typeof(StatusData))]
 [JsonSerializable(typeof(PrefillStart))]
 [JsonSerializable(typeof(RunSnapshot))]

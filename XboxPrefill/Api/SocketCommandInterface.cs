@@ -399,7 +399,8 @@ public sealed class SocketCommandInterface : IAsyncDisposable
                 Id = request.Id,
                 Success = snapshot != null,
                 Data = snapshot,
-                Error = snapshot == null ? "operation-not-found" : null
+                Error = snapshot == null ? "operation-not-found" : null,
+                ErrorCode = snapshot == null ? "operation-not-found" : null
             };
         }
 
@@ -808,143 +809,71 @@ public sealed class SocketCommandInterface : IAsyncDisposable
         CommandRequest request,
         CancellationToken cancellationToken)
     {
+        if (request.Parameters?.GetValueOrDefault("protocolVersion") != "2")
+            return new CommandResponse { Id = request.Id, Success = false, ErrorCode = "daemon-outdated", Error = "This daemon only accepts protocol version 2.", CompletedAt = DateTime.UtcNow };
+
         EnsureLoggedIn();
 
-        if (request.Parameters?.TryGetValue("protocolVersion", out var version) == true && version != "2")
-            return new CommandResponse { Id = request.Id, Error = "Unsupported protocol version." };
-
-        if (request.Parameters?.GetValueOrDefault("protocolVersion") == "2")
-        {
-            var captured = PrefillRun.Capture(request, _protocol);
-            var api = _api!;
-            var run = new PrefillRun(request.Id, _protocol, captured, _budget, _claims, _progress,
-                (snapshot, token) => _socketServer.BroadcastProgressAsync(new ProgressEvent(ToProgress(snapshot)), token));
-            var admission = await _prefillOperation.StartAsync(request.Id, PrefillProtocol.Fingerprint(captured), run.Progress,
-                async token =>
-                {
-                    _runs.TryAdd(run.OperationId, run);
-                    try
-                    {
-                        if (_authLost) throw new XboxLoginException("Xbox re-login required.");
-                        if (_execute != null) await _execute(run, token);
-                        else await api.PrefillAsync(run, token);
-                    }
-                    catch (XboxLoginException)
-                    {
-                        _authLost = true;
-                        _isLoggedIn = false;
-                        foreach (var active in _runs.Values)
-                        {
-                            active.TryChooseTerminal("failed", "auth-lost");
-                            _prefillOperation.Cancel(active.OperationId, _protocol.DaemonInstanceId);
-                        }
-                        throw;
-                    }
-                    catch (OperationCanceledException) when (token.IsCancellationRequested)
-                    {
-                        run.TryChooseTerminal("cancelled");
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        _progress.OnLog(LogLevel.Error, $"Prefill failed: {ex.Message}");
-                        var reason = ex switch
-                        {
-                            LancacheNotFoundException => "lancache-not-found",
-                            TimeoutException => "download-timeout",
-                            IOException => "cache-write-failed",
-                            _ => "download-failed"
-                        };
-                        run.TryChooseTerminal("failed", reason);
-                        throw;
-                    }
-                    finally
-                    {
-                        await run.CompleteAsync();
-                        _runs.TryRemove(run.OperationId, out _);
-                    }
-                }, _cts.Token);
-            return new CommandResponse
+        var captured = PrefillRun.Capture(request, _protocol);
+        var api = _api!;
+        var run = new PrefillRun(request.Id, _protocol, captured, _budget, _claims, _progress,
+            (snapshot, token) => _socketServer.BroadcastProgressAsync(new ProgressEvent(ToProgress(snapshot)), token));
+        var admission = await _prefillOperation.StartAsync(request.Id, PrefillProtocol.Fingerprint(captured), run.Progress,
+            async token =>
             {
-                Id = request.Id,
-                Success = admission.Accepted || admission.Replayed,
-                Error = admission.Error,
-                Data = admission.Operation == null ? null : new PrefillStart
+                _runs.TryAdd(run.OperationId, run);
+                try
                 {
-                    RunId = request.Id,
-                    DaemonInstanceId = _protocol.DaemonInstanceId,
-                    State = admission.Replayed ? admission.Operation.State : "started"
+                    if (_authLost) throw new XboxLoginException("Xbox re-login required.");
+                    if (_execute != null) await _execute(run, token);
+                    else await api.PrefillAsync(run, token);
                 }
-            };
-        }
-
-        if (_prefillOperation.IsRunning)
-        {
-            return new CommandResponse
-            {
-                Id = request.Id,
-                Success = false,
-                Error = "A prefill is already in progress",
-                CompletedAt = DateTime.UtcNow
-            };
-        }
-
-        var options = new PrefillOptions();
-
-        if (request.Parameters != null)
-        {
-            if (bool.TryParse(request.Parameters.GetValueOrDefault("all"), out var all))
-                options.DownloadAllOwnedGames = all;
-            if (bool.TryParse(request.Parameters.GetValueOrDefault("force"), out var force))
-                options.Force = force;
-            if (bool.TryParse(request.Parameters.GetValueOrDefault("recent"), out var recent))
-                options.Recent = recent;
-            if (bool.TryParse(request.Parameters.GetValueOrDefault("top"), out var top))
-                options.Top = top;
-
-            // Optional explicit Store ProductIds (manual entry); these flow through to manualIds and may be IDs
-            // that aren't present in the titlehub-owned library.
-            var productIdsJson = request.Parameters.GetValueOrDefault("productIds");
-            if (!string.IsNullOrEmpty(productIdsJson))
-            {
-                var productIds = JsonSerializer.Deserialize(productIdsJson, DaemonSerializationContext.Default.ListString);
-                if (productIds != null && productIds.Count > 0)
+                catch (XboxLoginException)
                 {
-                    options.ProductIds = productIds;
+                    _authLost = true;
+                    _isLoggedIn = false;
+                    foreach (var active in _runs.Values)
+                    {
+                        active.TryChooseTerminal("failed", "auth-lost");
+                        _prefillOperation.Cancel(active.OperationId, _protocol.DaemonInstanceId);
+                    }
+                    throw;
                 }
-            }
-        }
-
-        await _prefillOperation.StartAsync(async operationToken =>
-        {
-            try
-            {
-                var result = await _api!.PrefillAsync(options, operationToken);
-                operationToken.ThrowIfCancellationRequested();
-
-                if (result.Success)
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
-                    _progress.OnLog(LogLevel.Info, "Prefill completed successfully");
+                    run.TryChooseTerminal("cancelled");
+                    throw;
                 }
-                else
+                catch (Exception ex)
                 {
-                    _progress.OnLog(LogLevel.Warning, $"Prefill completed with errors: {result.ErrorMessage}");
-                    throw new InvalidOperationException(result.ErrorMessage ?? "Prefill failed");
+                    _progress.OnLog(LogLevel.Error, $"Prefill failed: {ex.Message}");
+                    var reason = ex switch
+                    {
+                        LancacheNotFoundException => "lancache-not-found",
+                        TimeoutException => "download-timeout",
+                        IOException => "cache-write-failed",
+                        _ => "download-failed"
+                    };
+                    run.TryChooseTerminal("failed", reason);
+                    throw;
                 }
-            }
-            catch (OperationCanceledException) when (operationToken.IsCancellationRequested)
-            {
-                _progress.OnCancelled("Prefill cancelled by user");
-                throw;
-            }
-        }, _cts.Token);
-
+                finally
+                {
+                    await run.CompleteAsync();
+                    _runs.TryRemove(run.OperationId, out _);
+                }
+            }, _cts.Token);
         return new CommandResponse
         {
             Id = request.Id,
-            Success = true,
-            Message = "Prefill started",
-            CompletedAt = DateTime.UtcNow
+            Success = admission.Accepted || admission.Replayed,
+            Error = admission.Error,
+            Data = admission.Operation == null ? null : new PrefillStart
+            {
+                RunId = request.Id,
+                DaemonInstanceId = _protocol.DaemonInstanceId,
+                State = admission.Replayed ? admission.Operation.State : "started"
+            }
         };
     }
 
@@ -961,7 +890,8 @@ public sealed class SocketCommandInterface : IAsyncDisposable
             Id = request.Id,
             Success = operation != null,
             Data = operation,
-            Error = operation == null ? "operation-not-found" : null
+            Error = operation == null ? "operation-not-found" : null,
+            ErrorCode = operation == null ? "operation-not-found" : null
         };
     }
 
@@ -1363,17 +1293,6 @@ public sealed class SocketCommandInterface : IAsyncDisposable
             BroadcastProgress(new PrefillProgressUpdate
             {
                 State = "error",
-                ErrorMessage = message,
-                UpdatedAt = DateTime.UtcNow
-            });
-        }
-
-        public void OnCancelled(string message)
-        {
-            OnLog(LogLevel.Info, message);
-            BroadcastProgress(new PrefillProgressUpdate
-            {
-                State = "cancelled",
                 ErrorMessage = message,
                 UpdatedAt = DateTime.UtcNow
             });

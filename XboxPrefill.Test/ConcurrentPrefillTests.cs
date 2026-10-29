@@ -84,6 +84,20 @@ public sealed class ConcurrentPrefillTests
         }
     }
 
+    [Fact]
+    public async Task APrefillWithoutProtocolVersionIsRefusedAsOutdated()
+    {
+        var protocol = new PrefillProtocol(3, "3");
+        await using var commands = new SocketCommandInterface(0, protocol, (_, _) => Task.CompletedTask);
+
+        var response = await commands.HandleCommandAsync(
+            new CommandRequest { Id = "A", Type = "prefill", Parameters = new() { ["appIds"] = "[\"A\"]" } },
+            CancellationToken.None);
+
+        Assert.False(response.Success);
+        Assert.Equal("daemon-outdated", response.ErrorCode);
+    }
+
     internal static CommandRequest Start(string id, PrefillProtocol protocol) => new()
     {
         Id = id,

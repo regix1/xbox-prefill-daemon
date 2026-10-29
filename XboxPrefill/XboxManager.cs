@@ -93,7 +93,7 @@ namespace XboxPrefill
             await _accountManager.ImportAndLoginAsync(refreshToken, deviceKeyPkcs8, cancellationToken);
         }
 
-        public async Task DownloadMultipleAppsAsync(
+        private async Task DownloadMultipleAppsAsync(
             bool downloadAllOwnedGames,
             bool force = false,
             List<string>? manualIds = null,
@@ -104,7 +104,7 @@ namespace XboxPrefill
             _prefillSummaryResult = new PrefillSummaryResult();
             var allOwnedGames = await GetAvailableGamesAsync(cancellationToken);
 
-            var appIdsToDownload = _run == null ? LoadPreviouslySelectedApps() : new List<string>();
+            var appIdsToDownload = new List<string>();
             if (manualIds != null)
             {
                 appIdsToDownload.AddRange(manualIds);
@@ -124,9 +124,10 @@ namespace XboxPrefill
 
             appIdsToDownload = appIdsToDownload.Select(id => id.Trim().ToUpperInvariant())
                 .Distinct(StringComparer.Ordinal).ToList();
-            if (_run != null && !_run.Progress.Snapshot.SelectionResolved) _run.Progress.ResolveSelection(appIdsToDownload);
+            if (!_run.Progress.Snapshot.SelectionResolved) _run.Progress.ResolveSelection(appIdsToDownload);
 
-            // Manual ProductIds may not appear in the titlehub library - prefill them directly.
+            // An appIds entry can be missing from the titlehub library, for example a saved selection whose
+            // title has left the library - prefill it directly.
             var ownedById = allOwnedGames.ToDictionary(e => e.AppId, e => e, StringComparer.OrdinalIgnoreCase);
 
             // Whitespace divider
@@ -138,8 +139,8 @@ namespace XboxPrefill
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                using var claim = _run?.Claims.TryClaim(_run.OperationId, new[] { appId });
-                if (_run != null && claim == null)
+                using var claim = _run.Claims.TryClaim(_run.OperationId, new[] { appId });
+                if (claim == null)
                 {
                     _progress.OnAppCompleted(new AppDownloadInfo { AppId = appId, Name = appId }, AppDownloadResult.Skipped);
                     continue;
@@ -148,7 +149,7 @@ namespace XboxPrefill
                 AppInfo? app = null;
                 try
                 {
-                    // Resolve from the owned library, or synthesise an AppInfo for a manually-entered ProductId.
+                    // Resolve from the owned library, or synthesise an AppInfo for an appIds entry missing from it.
                     app = ownedById.TryGetValue(appId, out var owned)
                         ? new AppInfo { AppId = appId, Title = owned.Title, Pfn = owned.Pfn, LastTimePlayed = owned.LastTimePlayed }
                         : new AppInfo { AppId = appId, Title = appId };
@@ -227,8 +228,8 @@ namespace XboxPrefill
         /// </summary>
         private async Task<List<string>> SelectTopTitleAppIdsAsync(List<AppInfo> allOwnedGames, CancellationToken cancellationToken)
         {
-            using var permit = _run == null ? null : await _run.AcquireAsync(cancellationToken);
-            var trendingProductIds = await _trendingTitlesProvider.GetTrendingProductIdsAsync(_run?.Options.TopCount ?? AppConfig.TopTitlesLimit, cancellationToken);
+            using var permit = await _run.AcquireAsync(cancellationToken);
+            var trendingProductIds = await _trendingTitlesProvider.GetTrendingProductIdsAsync(_run.Options.TopCount ?? AppConfig.TopTitlesLimit, cancellationToken);
             if (trendingProductIds.Count == 0)
             {
                 _progress.OnLog(LogLevel.Warning, "Could not retrieve Microsoft's most-played games list; falling back to all owned games for the \"Top\" prefill.");
@@ -279,10 +280,8 @@ namespace XboxPrefill
             }
 
             // Only download the app if it isn't already up to date (now that we know its version).
-            var isCached = _run != null
-                ? _run.IsCached(app.AppId, manifest.Version)
-                : _appInfoHandler.AppIsUpToDate(app);
-            if (force == false && _downloadArgs.Force == false && isCached == true)
+            var isCached = _run.IsCached(app.AppId, manifest.Version);
+            if (force == false && _downloadArgs.Force == false && isCached)
             {
                 _prefillSummaryResult.AlreadyUpToDate++;
                 var cachedApp = new AppDownloadInfo
@@ -340,18 +339,10 @@ namespace XboxPrefill
                 _ansiConsole.LogMarkupLine($"Finished in {LightYellow(downloadTimer.FormatElapsedString())} - {Magenta(totalBytes.CalculateBitrate(downloadTimer))}");
                 _ansiConsole.WriteLine();
 
-                if (_run != null)
-                {
-                    var committed = AppConfig.SkipDownloads
-                        ? _run.CompleteItem(appDownloadInfo, static () => { }, cancellationToken)
-                        : _appInfoHandler.MarkDownloadAsSuccessful(app, _run, appDownloadInfo, cancellationToken);
-                    if (!committed) return;
-                }
-                else
-                {
-                    if (!AppConfig.SkipDownloads) _appInfoHandler.MarkDownloadAsSuccessful(app);
-                    _progress.OnAppCompleted(appDownloadInfo, AppDownloadResult.Success);
-                }
+                var committed = AppConfig.SkipDownloads
+                    ? _run.CompleteItem(appDownloadInfo, static () => { }, cancellationToken)
+                    : _appInfoHandler.MarkDownloadAsSuccessful(app, _run, appDownloadInfo, cancellationToken);
+                if (!committed) return;
                 _prefillSummaryResult.Updated++;
             }
             else
